@@ -11,7 +11,7 @@ get_nearby_resources()     — [{"name": str, "x": float, "y": float, "amount": 
 """
 
 import json
-import cfg as cfg
+import game_integration.cfg as cfg
 import factorio_rcon
 
 

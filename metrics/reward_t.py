@@ -13,10 +13,9 @@ reward() is called every N steps (configurable).
 """
 
 import json
-import time
 from collections import defaultdict
-from game_integration.factorio_bridge import execute_lua, connect, get_player_inventory
-from metrics.unique_items import update_unique_items, get_unique_items_produced
+from metrics.unique_items import update_unique_items
+from game_integration.factorio_bridge import execute_lua, get_player_inventory
 
 # ---------------------------------------------------------------------------
 # Raw resource base values — cannot be crafted, only extracted.
@@ -230,53 +229,3 @@ def compute_reward(
         sorted(breakdown.items(), key=lambda kv: abs(kv[1]), reverse=True)
     )
     return total, breakdown
-
-
-# ---------------------------------------------------------------------------
-# Smoke test / inspection entry point
-# ---------------------------------------------------------------------------
-
-if __name__ == "__main__":
-    print("Connecting to Factorio RCON...")
-    connect()
-    print("Connected.\n")
-
-    print("Loading recipe prototypes...")
-    recipes = load_recipes()
-    print(f"  {len(recipes)} recipes loaded\n")
-
-    print("Computing value table (Bellman-Ford)...")
-    values = build_value_table(recipes)
-    print(f"  {len(values)} items with finite values\n")
-
-    print(f"  {'item':<42} {'V(i)':>10}")
-    print(f"  {'-'*42} {'-'*10}")
-    for name, val in sorted(values.items(), key=lambda x: x[1]):
-        print(f"  {name:<42} {val:>10.4f}")
-
-    print()
-    print("Computing reward(t)...")
-    print("Snapshot 1 — baseline inventory...")
-    total1, _ = compute_reward(values)
-    print(f"  reward = {total1:.4f}  (first call: full inventory counted as delta)\n")
-
-    print("Snapshot 2 — delta since snapshot 1 (do something in-game...")
-
-    execute_lua("game.players[1].insert{name='stone-wall', count=2}")
-    time.sleep(1)
-
-    total2, breakdown = compute_reward(values)
-    
-    print(f"  reward(t) = {total2:.4f}\n")
-    if breakdown:
-        print(f"  {'item':<42} {'delta V':>14}")
-        print(f"  {'-'*42} {'-'*14}")
-        for name, contrib in breakdown.items():
-            print(f"  {name:<42} {contrib:>+14.4f}")
-    else:
-        print("  (no inventory change detected)")
-
-    unique = get_unique_items_produced()
-    print(f"\nUnique items produced so far ({len(unique)}):")
-    for name in sorted(unique):
-        print(f"  {name}")
