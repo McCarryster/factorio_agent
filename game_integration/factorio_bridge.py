@@ -4,13 +4,10 @@ factorio_bridge.py — RCON bridge between Python and a Factorio headless server
 Public API
 ----------
 connect()                  — establish module-level RCON connection
-execute_lua(lua)           — run arbitrary Lua; return rcon.print() output
-get_player_position()      — {"x": float, "y": float}
-get_player_inventory()     — {"item-name": count, ...}
-get_nearby_resources()     — [{"name": str, "x": float, "y": float, "amount": int}, ...]
+execute_lua(lua)           — run Lua inside pcall; returns output, "OK", or "ERROR: ..."
+is_error(result)           — True if execute_lua returned an error string
 """
 
-import json
 import game_integration.cfg as cfg
 import factorio_rcon
 
@@ -47,147 +44,62 @@ def _get_client(client: factorio_rcon.RCONClient | None) -> factorio_rcon.RCONCl
     return _client  # type: ignore[return-value]
 
 
-def execute_lua(lua: str, client: factorio_rcon.RCONClient | None = None) -> str | None:
-    """
-    Execute arbitrary Lua code on the server.
+_LOAD_WRAPPER = (
+    'local __fn,__lerr=load("{lua}") '
+    "if __fn==nil then rcon.print('ERROR: '..tostring(__lerr)) "
+    "else local __ok,__err=pcall(__fn) "
+    "if not __ok then rcon.print('ERROR: '..tostring(__err)) end end"
+)
 
-    Use rcon.print() inside the Lua code to produce a return value.
-    Multiple statements can be separated by semicolons.
+
+def _escape_lua_string(s: str) -> str:
+    return (
+        s.replace("\\", "\\\\")
+         .replace('"', '\\"')
+         .replace("\n", "\\n")
+         .replace("\r", "\\r")
+         .replace("\0", "\\0")
+    )
+
+
+def execute_lua(lua: str, client: factorio_rcon.RCONClient | None = None) -> dict[str, str]:
+    """
+    Execute Lua code on the server with full error capture.
+
+    The code is compiled at runtime via load() so both syntax errors and
+    runtime errors are caught and returned as "ERROR: <message>" rather
+    than being silently swallowed. Use rcon.print() to produce output.
 
     Args:
         lua: Lua source code string.
         client: RCON client. Uses module-level connection if omitted.
 
     Returns:
-        String output from rcon.print(), or None if nothing was printed.
+        {"status": "OK"|"ERROR", "output": <rcon.print output or error string>}
+        output is "" when nothing was printed and no error occurred.
 
     Example:
         result = execute_lua("rcon.print(game.tick)")
+        if is_error(result):
+            print("Lua error:", result["output"])
     """
-    return _get_client(client).send_command("/c " + lua)
+    wrapped = _LOAD_WRAPPER.format(lua=_escape_lua_string(lua))
+    output = _get_client(client).send_command("/c " + wrapped) or ""
+    return {
+        "status": "ERROR" if output.startswith("ERROR:") else "OK",
+        "output": output,
+    }
+
+
+def is_error(result: dict[str, str]) -> bool:
+    """Return True if execute_lua returned an error result."""
+    return result["status"] == "ERROR"
 
 
 # ---------------------------------------------------------------------------
-# Observation functions
+# Quick test
 # ---------------------------------------------------------------------------
-
-def get_player_position(
-    player_index: int = 1,
-    client: factorio_rcon.RCONClient | None = None,
-) -> dict:
-    """
-    Return the current map position of a player.
-
-    Args:
-        player_index: 1-based player index (default 1).
-        client: RCON client. Uses module-level connection if omitted.
-
-    Returns:
-        {"x": float, "y": float}
-
-    Example:
-        pos = get_player_position()
-        print(pos["x"], pos["y"])
-    """
-    lua = (
-        """local p = game.players[%d].position; """
-        """rcon.print('{"x":' .. p.x .. ',"y":' .. p.y .. '}')"""
-    ) % player_index
-    result = execute_lua(lua, client)
-    return json.loads(result) if result else {}
-
-
-def get_player_inventory(
-    player_index: int = 1,
-    client: factorio_rcon.RCONClient | None = None,
-) -> dict:
-    """
-    Return the contents of a player's main inventory.
-
-    Args:
-        player_index: 1-based player index (default 1).
-        client: RCON client. Uses module-level connection if omitted.
-
-    Returns:
-        {"item-name": count, ...}  e.g. {"iron-plate": 10, "coal": 5}
-        Empty dict {} if inventory is empty.
-
-    Example:
-        inv = get_player_inventory()
-        print(inv.get("iron-plate", 0))
-    """
-    lua = """
-local inv      = game.players[%d].get_main_inventory()
-local contents = inv.get_contents()
-local out      = {}
-for _, item in ipairs(contents) do
-  out[#out+1] = '{"name":"' .. item.name .. '","count":' .. item.count .. '}'
-end
-rcon.print('[' .. table.concat(out, ',') .. ']')
-""" % player_index
-    result = execute_lua(lua.strip(), client)
-    if not result:
-        return {}
-    counts: dict[str, int] = {}
-    for item in json.loads(result):
-        counts[item["name"]] = counts.get(item["name"], 0) + item["count"]
-    return counts
-
-
-def get_nearby_resources(
-    radius: int = 32,
-    player_index: int = 1,
-    client: factorio_rcon.RCONClient | None = None,
-) -> list:
-    """
-    Return resource entities (ore patches) within a given radius of the player.
-
-    Args:
-        radius: Search radius in tiles (default 32).
-        player_index: 1-based player index (default 1).
-        client: RCON client. Uses module-level connection if omitted.
-
-    Returns:
-        List of resource dicts, each with:
-          - "name"   (str)   entity prototype name, e.g. "iron-ore"
-          - "x"      (float) map X coordinate
-          - "y"      (float) map Y coordinate
-          - "amount" (int)   remaining resource units
-        Empty list [] if none found.
-
-    Example:
-        resources = get_nearby_resources(radius=64)
-        iron = [r for r in resources if r["name"] == "iron-ore"]
-    """
-    lua = (
-        """local pl = game.players[%d]; """
-        """local ents = pl.surface.find_entities_filtered{position=pl.position, radius=%d, type="resource"}; """
-        """local parts = {}; """
-        """for _, e in ipairs(ents) do """
-        """  table.insert(parts, '{"name":"' .. e.name .. '","x":' .. e.position.x .. ',"y":' .. e.position.y .. ',"amount":' .. (e.amount or 0) .. '}') """
-        """end; """
-        """rcon.print('[' .. table.concat(parts, ',') .. ']')"""
-    ) % (player_index, radius)
-    result = execute_lua(lua, client)
-    return json.loads(result) if result else []
-
-
-# ---------------------------------------------------------------------------
-# Quick smoke test
-# ---------------------------------------------------------------------------
-
 if __name__ == "__main__":
     print("Connecting to Factorio RCON...")
     connect()
     print("Connected.\n")
-
-    pos = get_player_position()
-    print(f"Player position : {pos}")
-
-    inv = get_player_inventory()
-    print(f"Player inventory: {inv}")
-
-    resources = get_nearby_resources(radius=512)
-    print(f"Nearby resources: {len(resources)} entities found")
-    for r in resources[:5]:
-        print(f"  {r['name']:20s}  at ({r['x']:8.1f}, {r['y']:8.1f})  amount={r['amount']}")

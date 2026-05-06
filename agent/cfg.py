@@ -1,0 +1,23 @@
+
+import enum
+import dotenv
+import os
+
+
+# Load environment variables from .env file
+dotenv.load_dotenv()
+
+# API credentials
+API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "")
+
+
+
+class Models(enum.Enum):
+    """Available Anthropic Claude model versions."""
+    CLAUDE_SONNET_4_5 = "claude-sonnet-4-5-20251001"
+    CLAUDE_HAIKU_4_5 = "claude-haiku-4-5-20251001"
+    CLAUDE_OPUS_4_5 = "claude-opus-4-5-20251001"
+
+
+# Default model configuration
+DEFAULT_MODEL: str = Models.CLAUDE_HAIKU_4_5.value

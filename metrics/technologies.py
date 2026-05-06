@@ -2,7 +2,9 @@
 metrics/technologies.py — Technology research state queries via RCON.
 """
 
-from game_integration.factorio_bridge import execute_lua
+from collections import deque
+
+from game_integration.factorio_bridge import execute_lua, is_error
 
 _LUA_RESEARCHED = """
 local out = {}
@@ -37,10 +39,10 @@ def get_technologies_researched(client=None) -> list[str]:
     Returns:
         List of researched technology name strings.
     """
-    raw = execute_lua(_LUA_RESEARCHED.strip(), client)
-    if not raw:
+    result = execute_lua(_LUA_RESEARCHED.strip(), client)
+    if is_error(result) or not result["output"]:
         return []
-    return [t for t in raw.split(",") if t]
+    return [t for t in result["output"].split(",") if t]
 
 
 def get_tech_tree_depth(client=None) -> int:
@@ -49,7 +51,8 @@ def get_tech_tree_depth(client=None) -> int:
 
     Fetches each researched technology's prerequisites and computes the
     longest path in the prerequisite DAG where every node is researched.
-    Measures depth into the tech tree, not raw count.
+    Uses Kahn's topological sort so cycles and deep chains never cause
+    recursion errors.
 
     Args:
         client: RCON client. Uses module-level connection if omitted.
@@ -64,16 +67,26 @@ def get_tech_tree_depth(client=None) -> int:
 
     prereqs: dict[str, list[str]] = {}
     for name in researched:
-        raw = execute_lua((_LUA_PREREQUISITES % name).strip(), client)
-        prereqs[name] = [p for p in (raw or "").split(",") if p and p in researched]
+        result = execute_lua((_LUA_PREREQUISITES % name).strip(), client)
+        raw = result["output"] if not is_error(result) else ""
+        prereqs[name] = [p for p in raw.split(",") if p and p in researched]
 
-    depth_cache: dict[str, int] = {}
+    # dependents[p] = techs that list p as a prerequisite
+    dependents: dict[str, list[str]] = {n: [] for n in researched}
+    in_degree: dict[str, int] = {n: len(prereqs[n]) for n in researched}
+    for name, plist in prereqs.items():
+        for p in plist:
+            dependents[p].append(name)
 
-    def _depth(name: str) -> int:
-        if name in depth_cache:
-            return depth_cache[name]
-        result = 1 + max((_depth(p) for p in prereqs.get(name, [])), default=0)
-        depth_cache[name] = result
-        return result
+    depth: dict[str, int] = {n: 1 for n in researched}
+    queue: deque[str] = deque(n for n in researched if in_degree[n] == 0)
 
-    return max(_depth(name) for name in researched)
+    while queue:
+        node = queue.popleft()
+        for dep in dependents[node]:
+            depth[dep] = max(depth[dep], depth[node] + 1)
+            in_degree[dep] -= 1
+            if in_degree[dep] == 0:
+                queue.append(dep)
+
+    return max(depth.values())

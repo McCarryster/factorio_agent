@@ -15,7 +15,7 @@ reward() is called every N steps (configurable).
 import json
 from collections import defaultdict
 from metrics.unique_items import update_unique_items
-from game_integration.factorio_bridge import execute_lua, get_player_inventory
+from game_integration.factorio_bridge import execute_lua, get_player_inventory, is_error
 
 # ---------------------------------------------------------------------------
 # Raw resource base values — cannot be crafted, only extracted.
@@ -94,10 +94,10 @@ def load_recipes(client=None) -> list[dict]:
               "ingredients": [{"name": str, "amount": float}, ...],
               "products":    [{"name": str, "amount": float}, ...]}, ...]
     """
-    raw = execute_lua(_LUA_LOAD_RECIPES.strip(), client)
-    if not raw:
+    result = execute_lua(_LUA_LOAD_RECIPES.strip(), client)
+    if is_error(result) or not result["output"]:
         return []
-    return json.loads(raw)
+    return json.loads(result["output"])
 
 
 def build_value_table(recipes: list[dict]) -> dict[str, float]:

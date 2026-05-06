@@ -2,7 +2,7 @@
 import tempfile
 import time
 from pathlib import Path
-from game_integration.factorio_bridge import execute_lua, connect
+from game_integration.factorio_bridge import execute_lua, connect, is_error
 from metrics.reward_t import load_recipes, build_value_table, compute_reward
 from metrics.unique_items import get_unique_items_produced
 from metrics.skill_library import get_skill_library_size, get_skill_names, SKILLS_DIR
@@ -21,6 +21,38 @@ if __name__ == "__main__":
     connect()
     print("Connected.\n")
 
+    # -------------------------------------------------------------------------
+    # execute_lua pcall wrapper
+    # -------------------------------------------------------------------------
+    print("--- execute_lua ---")
+
+    # Valid Lua that prints something
+    r = execute_lua("rcon.print('hello')")
+    assert r["status"] == "OK", f"expected OK, got {r}"
+    assert r["output"] == "hello", f"expected 'hello', got {r['output']!r}"
+    assert not is_error(r)
+
+    # Valid Lua that prints nothing → status OK, output ""
+    r = execute_lua("local x = 1 + 1")
+    assert r["status"] == "OK", f"expected OK, got {r}"
+    assert r["output"] == "", f"expected empty output, got {r['output']!r}"
+    assert not is_error(r)
+
+    # Broken Lua → error
+    r = execute_lua("qweqwe5sertsef246$Q#$RDaw^&^&^ is not valid lua @@@@")
+    assert is_error(r), f"expected ERROR status, got {r}"
+    print(f"  broken Lua error: {r['output']}")
+
+    # Runtime error (nil indexing)
+    r = execute_lua("local t = nil; rcon.print(t.x)")
+    assert is_error(r), f"expected ERROR status, got {r}"
+    print(f"  runtime error:   {r['output']}")
+
+    print("execute_lua: all assertions passed\n")
+
+    # -------------------------------------------------------------------------
+    # Value table
+    # -------------------------------------------------------------------------
     print("Loading recipe prototypes...")
     recipes = load_recipes()
     print(f"  {len(recipes)} recipes loaded\n")
