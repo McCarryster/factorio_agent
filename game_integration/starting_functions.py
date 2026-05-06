@@ -109,3 +109,60 @@ def get_nearby_resources(
     ) % (player_index, radius)
     result = execute_lua(lua, client)
     return json.loads(result["output"]) if not is_error(result) and result["output"] else []
+
+
+def get_nearby_cluster_resources(
+    radius: int = 32,
+    player_index: int = 1,
+    client: factorio_rcon.RCONClient | None = None,
+) -> list[dict[str, Any]]:
+    """
+    Return one cluster entry per resource type within a radius of the player.
+
+    Aggregates all individual ore entities of the same type into a single
+    entry with centroid position and total amount, so the agent sees one
+    iron-ore cluster instead of thousands of individual tiles.
+
+    Args:
+        radius: Search radius in tiles (default 32).
+        player_index: 1-based player index (default 1).
+        client: RCON client. Uses module-level connection if omitted.
+
+    Returns:
+        List of cluster dicts, one per resource type found:
+          - "name"   (str)   resource prototype name, e.g. "iron-ore"
+          - "x"      (float) centroid X of all matching ore tiles
+          - "y"      (float) centroid Y of all matching ore tiles
+          - "amount" (int)   total remaining resource units
+          - "count"  (int)   number of individual ore tiles in cluster
+        Empty list [] if none found.
+
+    Example:
+        clusters = get_nearby_cluster_resources(radius=128)
+        for c in clusters:
+            print(c["name"], c["x"], c["y"], c["amount"])
+    """
+    lua = """
+local pl = game.players[%d]
+local ents = pl.surface.find_entities_filtered{position=pl.position, radius=%d, type="resource"}
+local clusters = {}
+for _, e in ipairs(ents) do
+  local nm = e.name
+  if not clusters[nm] then clusters[nm] = {x=0, y=0, amount=0, count=0} end
+  local c = clusters[nm]
+  c.x = c.x + e.position.x
+  c.y = c.y + e.position.y
+  c.amount = c.amount + (e.amount or 0)
+  c.count = c.count + 1
+end
+local parts = {}
+for nm, c in pairs(clusters) do
+  local cx = c.x / c.count
+  local cy = c.y / c.count
+  parts[#parts+1] = ('{"name":"' .. nm .. '","x":' .. cx .. ',"y":' .. cy
+    .. ',"amount":' .. c.amount .. ',"count":' .. c.count .. '}')
+end
+rcon.print('[' .. table.concat(parts, ',') .. ']')
+""" % (player_index, radius)
+    result = execute_lua(lua.strip(), client)
+    return json.loads(result["output"]) if not is_error(result) and result["output"] else []

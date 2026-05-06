@@ -10,6 +10,10 @@ here but not yet evaluated — their conditions are stubbed with False
 until the agent can query those game states.
 """
 
+import json
+
+from game_integration.factorio_bridge import execute_lua, is_error
+
 MILESTONES: list[str] = [
     "first_resource_mined",     # any raw resource appears in inventory
     "first_craft",              # any crafted item appears in inventory
@@ -105,3 +109,41 @@ def get_next_milestone(reached: set[str]) -> str | None:
         if m not in reached:
             return m
     return None
+
+
+def get_entities_placed(
+    player_index: int = 1,
+    client=None,
+) -> dict[str, int]:
+    """
+    Return the count of each entity type placed by the player's force.
+
+    Queries all entities on the player's current surface that belong to
+    the player force, grouped by prototype name.
+
+    Args:
+        player_index: 1-based player index used to determine the surface
+                      and force (default 1).
+        client: RCON client. Uses module-level connection if omitted.
+
+    Returns:
+        {"entity-name": count, ...}, e.g. {"stone-furnace": 2, "burner-mining-drill": 1}
+        Empty dict {} if nothing has been placed or on error.
+    """
+    lua = """
+local pl = game.players[%d]
+local ents = pl.surface.find_entities_filtered{force = pl.force}
+local counts = {}
+for _, e in ipairs(ents) do
+  counts[e.name] = (counts[e.name] or 0) + 1
+end
+local parts = {}
+for nm, cnt in pairs(counts) do
+  parts[#parts+1] = '{"name":"' .. nm .. '","count":' .. cnt .. '}'
+end
+rcon.print('[' .. table.concat(parts, ',') .. ']')
+""" % player_index
+    result = execute_lua(lua.strip(), client)
+    if is_error(result) or not result["output"]:
+        return {}
+    return {entry["name"]: entry["count"] for entry in json.loads(result["output"])}

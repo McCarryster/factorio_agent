@@ -15,7 +15,8 @@ reward() is called every N steps (configurable).
 import json
 from collections import defaultdict
 from metrics.unique_items import update_unique_items
-from game_integration.factorio_bridge import execute_lua, get_player_inventory, is_error
+from game_integration.factorio_bridge import execute_lua, is_error
+from game_integration.starting_functions import get_player_inventory
 
 # ---------------------------------------------------------------------------
 # Raw resource base values — cannot be crafted, only extracted.
@@ -180,6 +181,9 @@ REWARD_INTERVAL: int = 60
 # Delta between snapshots = net items produced minus items consumed.
 _previous_inventory: dict[str, int] = {}
 
+# Cached value table — built once on first get_reward() call.
+_value_table: dict[str, float] | None = None
+
 
 def compute_reward(
     values: dict[str, float],
@@ -229,3 +233,33 @@ def compute_reward(
         sorted(breakdown.items(), key=lambda kv: abs(kv[1]), reverse=True)
     )
     return total, breakdown
+
+
+def get_reward(
+    player_index: int = 1,
+    client=None,
+) -> tuple[float, dict[str, float]]:
+    """
+    Compute and return reward(t) without requiring the caller to manage the
+    value table.
+
+    Builds the value table from Factorio recipe prototypes on the first call
+    and caches it for all subsequent calls. Drop-in convenience wrapper around
+    load_recipes / build_value_table / compute_reward.
+
+    Args:
+        player_index: 1-based player index (default 1).
+        client: RCON client. Uses module-level connection if omitted.
+
+    Returns:
+        (total_reward, breakdown) — same as compute_reward().
+    """
+    global _value_table
+    if _value_table is None:
+        _value_table = build_value_table(load_recipes(client))
+    return compute_reward(_value_table, player_index, client)
+
+
+
+if __name__ == "__main__":
+    get_reward()

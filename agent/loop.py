@@ -1,26 +1,32 @@
+"""
+TODO: description
+"""
+
+
 # from agent.prompt import get_factorio_voyager_prompt
 from agent.prompt import PROMPT
 import anthropic
 from anthropic.types import MessageParam
-from agent.starting_functions import get_player_inventory, get_player_position
+from game_integration.starting_functions import get_player_inventory, get_player_position
 from agent.utils import parse_agent_output, build_observation
 import agent.cfg as cfg
 from game_integration.factorio_bridge import execute_lua
+from metrics.all_metrics import get_all_metrics
 from typing import Any
 
 
 client = anthropic.Anthropic(api_key=cfg.API_KEY)
-
-def run(task: str, max_iterations: int = 5):
-    history: list[MessageParam] = [{"role": "user", "content": f"Task: {task}"}]
+# 1. call API
+# 2. extract code from response
+# 3. execute code
+# 4. observe result
+# 5. update history
+# 6. check if done
+def run(task: str, max_iterations: int = 10):
+    start_observation = build_observation(result=None, radius=64, start=True)
+    starting_observation = f"Task: {task}" + start_observation
+    history: list[MessageParam] = [{"role": "user", "content": starting_observation}]
     for i in range(max_iterations):
-        # 1. call API
-        # 2. extract code from response
-        # 3. execute code
-        # 4. observe result
-        # 5. update history
-        # 6. check if done
-
         # 1. Call API
         response = client.messages.create(
             model=cfg.DEFAULT_MODEL,
@@ -34,22 +40,21 @@ def run(task: str, max_iterations: int = 5):
         # 2. extract code from response
         parsed_response: dict[str, Any]= parse_agent_output(response.content[0].text) # type: ignore
         # parsed_response: dict[str, Any]= parse_agent_output(response) # type: ignore
-        
+        build_observation(result=None, radius=64, start=True) # makes before snapshot for reward
+
         # 3. execute code
         result = execute_lua(parsed_response['action'])
         
         # 4. observe result
-        current_inventory = get_player_inventory()
-        current_pos = get_player_position()
-        observation = build_observation(result, current_inventory, current_pos)
-        print(observation)
+        observation = build_observation(result=result, radius=64, start=False) # makes after snapshot for result (delta)
 
         # 5. update history
         # history.append({"role": "assistant", "content": response})
         history.append({"role": "assistant", "content": response.content[0].text}) # type: ignore
         history.append({"role": "user", "content": observation})
 
-        print(f"Iteration {i} - \n", f"history - {history}")
+        print(i, observation)
+        # print(f"Iteration {i} - \n", f"history - {history}")
 
         if parsed_response["done"]:
             print("Task was marked as DONE")

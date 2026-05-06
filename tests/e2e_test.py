@@ -3,6 +3,7 @@ import tempfile
 import time
 from pathlib import Path
 from game_integration.factorio_bridge import execute_lua, connect, is_error
+from game_integration.starting_functions import get_player_inventory
 from metrics.reward_t import load_recipes, build_value_table, compute_reward
 from metrics.unique_items import get_unique_items_produced
 from metrics.skill_library import get_skill_library_size, get_skill_names, SKILLS_DIR
@@ -72,8 +73,7 @@ if __name__ == "__main__":
     total1, _ = compute_reward(values)
     print(f"  reward = {total1:.4f}  (first call: full inventory counted as delta)\n")
 
-    print("Snapshot 2 — delta since snapshot 1 (do something in-game...")
-
+    print("Snapshot 2 — delta since snapshot 1 (do something in-game...)")
     execute_lua("game.players[1].insert{name='stone-wall', count=2}")
     time.sleep(1)
 
@@ -177,7 +177,7 @@ if __name__ == "__main__":
 
     # Live check against actual game inventory
     print("\n--- milestones (live) ---")
-    from game_integration.factorio_bridge import get_player_inventory
+
     live_inv = get_player_inventory()
     live_reached: set[str] = set()
     check_milestones(live_inv, live_reached)

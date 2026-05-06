@@ -10,38 +10,8 @@ is_error(result)           — True if execute_lua returned an error string
 
 import game_integration.cfg as cfg
 import factorio_rcon
+from game_integration.dependencies import get_client
 
-
-_client: factorio_rcon.RCONClient | None = None
-
-
-def connect(
-    host: str = cfg.HOST,
-    port: int = cfg.PORT,
-    password: str = cfg.PASSWORD,
-) -> factorio_rcon.RCONClient:
-    """
-    Connect to the Factorio RCON server and store the connection globally.
-
-    Args:
-        host: RCON server hostname or IP.
-        port: RCON port.
-        password: RCON password.
-
-    Returns:
-        The RCONClient (also stored in the module-level _client).
-    """
-    global _client
-    _client = factorio_rcon.RCONClient(host, port, password)
-    return _client
-
-
-def _get_client(client: factorio_rcon.RCONClient | None) -> factorio_rcon.RCONClient:
-    if client is not None:
-        return client
-    if _client is None:
-        connect()
-    return _client  # type: ignore[return-value]
 
 
 _LOAD_WRAPPER = (
@@ -62,7 +32,7 @@ def _escape_lua_string(s: str) -> str:
     )
 
 
-def execute_lua(lua: str, client: factorio_rcon.RCONClient | None = None) -> dict[str, str]:
+def execute_lua(lua: str, client: factorio_rcon.RCONClient) -> dict[str, str]:
     """
     Execute Lua code on the server with full error capture.
 
@@ -80,11 +50,9 @@ def execute_lua(lua: str, client: factorio_rcon.RCONClient | None = None) -> dic
 
     Example:
         result = execute_lua("rcon.print(game.tick)")
-        if is_error(result):
-            print("Lua error:", result["output"])
     """
     wrapped = _LOAD_WRAPPER.format(lua=_escape_lua_string(lua))
-    output = _get_client(client).send_command("/c " + wrapped) or ""
+    output = client.send_command("/silent-command " + wrapped) or ""
     return {
         "status": "ERROR" if output.startswith("ERROR:") else "OK",
         "output": output,
@@ -101,5 +69,5 @@ def is_error(result: dict[str, str]) -> bool:
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
     print("Connecting to Factorio RCON...")
-    connect()
+    get_client(host=cfg.HOST, port=cfg.PORT, password=cfg.PASSWORD)
     print("Connected.\n")
