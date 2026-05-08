@@ -2,7 +2,8 @@
 import tempfile
 import time
 from pathlib import Path
-from game_integration.factorio_bridge import execute_lua, connect, is_error
+from game_integration.factorio_bridge import execute_lua, is_error
+from game_integration.dependencies import get_client
 from game_integration.starting_functions import get_player_inventory
 from metrics.reward_t import load_recipes, build_value_table, compute_reward
 from metrics.unique_items import get_unique_items_produced
@@ -19,7 +20,7 @@ import metrics.skill_reuse as skill_reuse
 
 if __name__ == "__main__":
     print("Connecting to Factorio RCON...")
-    connect()
+    client = get_client()
     print("Connected.\n")
 
     # -------------------------------------------------------------------------
@@ -28,24 +29,24 @@ if __name__ == "__main__":
     print("--- execute_lua ---")
 
     # Valid Lua that prints something
-    r = execute_lua("rcon.print('hello')")
+    r = execute_lua(client, "rcon.print('hello')")
     assert r["status"] == "OK", f"expected OK, got {r}"
     assert r["output"] == "hello", f"expected 'hello', got {r['output']!r}"
     assert not is_error(r)
 
     # Valid Lua that prints nothing → status OK, output ""
-    r = execute_lua("local x = 1 + 1")
+    r = execute_lua(client, "local x = 1 + 1")
     assert r["status"] == "OK", f"expected OK, got {r}"
     assert r["output"] == "", f"expected empty output, got {r['output']!r}"
     assert not is_error(r)
 
     # Broken Lua → error
-    r = execute_lua("qweqwe5sertsef246$Q#$RDaw^&^&^ is not valid lua @@@@")
+    r = execute_lua(client, "qweqwe5sertsef246$Q#$RDaw^&^&^ is not valid lua @@@@")
     assert is_error(r), f"expected ERROR status, got {r}"
     print(f"  broken Lua error: {r['output']}")
 
     # Runtime error (nil indexing)
-    r = execute_lua("local t = nil; rcon.print(t.x)")
+    r = execute_lua(client, "local t = nil; rcon.print(t.x)")
     assert is_error(r), f"expected ERROR status, got {r}"
     print(f"  runtime error:   {r['output']}")
 
@@ -55,7 +56,7 @@ if __name__ == "__main__":
     # Value table
     # -------------------------------------------------------------------------
     print("Loading recipe prototypes...")
-    recipes = load_recipes()
+    recipes = load_recipes(client)
     print(f"  {len(recipes)} recipes loaded\n")
 
     print("Computing value table (Bellman-Ford)...")
@@ -70,14 +71,14 @@ if __name__ == "__main__":
     print()
     print("Computing reward(t)...")
     print("Snapshot 1 — baseline inventory...")
-    total1, _ = compute_reward(values)
+    total1, _ = compute_reward(client, values)
     print(f"  reward = {total1:.4f}  (first call: full inventory counted as delta)\n")
 
     print("Snapshot 2 — delta since snapshot 1 (do something in-game...)")
-    execute_lua("game.players[1].insert{name='stone-wall', count=2}")
+    execute_lua(client, "game.players[1].insert{name='stone-wall', count=2}")
     time.sleep(1)
 
-    total2, breakdown = compute_reward(values)
+    total2, breakdown = compute_reward(client, values)
     
     print(f"  reward(t) = {total2:.4f}\n")
     if breakdown:
@@ -178,7 +179,7 @@ if __name__ == "__main__":
     # Live check against actual game inventory
     print("\n--- milestones (live) ---")
 
-    live_inv = get_player_inventory()
+    live_inv = get_player_inventory(client)
     live_reached: set[str] = set()
     check_milestones(live_inv, live_reached)
     print(f"  reached: {get_milestones_reached(live_reached)}")

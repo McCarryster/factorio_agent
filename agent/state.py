@@ -16,6 +16,7 @@ class AgentState:
     status: AgentStatus = AgentStatus.RUNNING
     last_action: str | None = None
     last_observation: str | None = None
+    history_window: int | None = None
 
     @property
     def is_terminal(self) -> bool:

@@ -5,15 +5,12 @@ TODO: description
 
 import json
 import factorio_rcon
-from game_integration.factorio_bridge import execute_lua, is_error
+from game_integration.factorio_bridge import execute_lua
 from typing import Any
 
 
 
-def get_player_position(
-    player_index: int = 1,
-    client: factorio_rcon.RCONClient | None = None,
-) -> dict[str, float]:
+def get_player_position(client: factorio_rcon.RCONClient, player_index: int = 1) -> dict[str, float]:
     """
     Return the current map position of a player.
 
@@ -32,14 +29,11 @@ def get_player_position(
         """local p = game.players[%d].position; """
         """rcon.print('{"x":' .. p.x .. ',"y":' .. p.y .. '}')"""
     ) % player_index
-    result = execute_lua(lua, client)
-    return json.loads(result["output"]) if not is_error(result) and result["output"] else {}
+    result = execute_lua(client, lua)
+    return json.loads(result["output"]) if result['status'] == "OK" and result["output"] else {}
 
 
-def get_player_inventory(
-    player_index: int = 1,
-    client: factorio_rcon.RCONClient | None = None,
-) -> dict[str, int]:
+def get_player_inventory(client: factorio_rcon.RCONClient, player_index: int = 1) -> dict[str, int]:
     """
     Return the contents of a player's main inventory.
 
@@ -64,8 +58,8 @@ for _, item in ipairs(contents) do
 end
 rcon.print('[' .. table.concat(out, ',') .. ']')
 """ % player_index
-    result = execute_lua(lua.strip(), client)
-    if is_error(result) or not result["output"]:
+    result = execute_lua(client, lua.strip())
+    if result['status'] == "ERROR" or not result["output"]:
         return {}
     counts: dict[str, int] = {}
     for item in json.loads(result["output"]):
@@ -74,9 +68,9 @@ rcon.print('[' .. table.concat(out, ',') .. ']')
 
 
 def get_nearby_resources(
+    client: factorio_rcon.RCONClient,
     radius: int = 32,
     player_index: int = 1,
-    client: factorio_rcon.RCONClient | None = None,
 ) -> list[dict[str, Any]]:
     """
     Return resource entities (ore patches) within a given radius of the player.
@@ -107,14 +101,14 @@ def get_nearby_resources(
         """end; """
         """rcon.print('[' .. table.concat(parts, ',') .. ']')"""
     ) % (player_index, radius)
-    result = execute_lua(lua, client)
-    return json.loads(result["output"]) if not is_error(result) and result["output"] else []
+    result = execute_lua(client, lua)
+    return json.loads(result["output"]) if result['status'] == "OK" and result["output"] else []
 
 
 def get_nearby_cluster_resources(
+    client: factorio_rcon.RCONClient,
     radius: int = 32,
     player_index: int = 1,
-    client: factorio_rcon.RCONClient | None = None,
 ) -> list[dict[str, Any]]:
     """
     Return one cluster entry per resource type within a radius of the player.
@@ -164,5 +158,5 @@ for nm, c in pairs(clusters) do
 end
 rcon.print('[' .. table.concat(parts, ',') .. ']')
 """ % (player_index, radius)
-    result = execute_lua(lua.strip(), client)
-    return json.loads(result["output"]) if not is_error(result) and result["output"] else []
+    result = execute_lua(client, lua.strip())
+    return json.loads(result["output"]) if not result['status'] == "OK" and result["output"] else []

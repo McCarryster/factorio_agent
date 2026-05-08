@@ -11,8 +11,9 @@ until the agent can query those game states.
 """
 
 import json
+import factorio_rcon
 
-from game_integration.factorio_bridge import execute_lua, is_error
+from game_integration.factorio_bridge import execute_lua
 
 MILESTONES: list[str] = [
     "first_resource_mined",     # any raw resource appears in inventory
@@ -112,8 +113,8 @@ def get_next_milestone(reached: set[str]) -> str | None:
 
 
 def get_entities_placed(
+    client: factorio_rcon.RCONClient,
     player_index: int = 1,
-    client=None,
 ) -> dict[str, int]:
     """
     Return the count of each entity type placed by the player's force.
@@ -143,7 +144,7 @@ for nm, cnt in pairs(counts) do
 end
 rcon.print('[' .. table.concat(parts, ',') .. ']')
 """ % player_index
-    result = execute_lua(lua.strip(), client)
-    if is_error(result) or not result["output"]:
+    result = execute_lua(client, lua.strip())
+    if result['status'] == "ERROR" or not result["output"]:
         return {}
     return {entry["name"]: entry["count"] for entry in json.loads(result["output"])}

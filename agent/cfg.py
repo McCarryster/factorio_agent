@@ -2,6 +2,7 @@
 import enum
 import dotenv
 import os
+from pathlib import Path
 
 
 # Load environment variables from .env file
@@ -27,3 +28,7 @@ class Models(enum.Enum):
 
 # Default model configuration
 DEFAULT_MODEL: str = Models.CLAUDE_HAIKU_4_5.value
+
+
+# Path to look for or save skills
+SKILLS_DIR = Path(__file__).resolve().parent.parent / "skills"

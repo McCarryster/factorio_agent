@@ -15,8 +15,11 @@ reward() is called every N steps (configurable).
 import json
 from collections import defaultdict
 from metrics.unique_items import update_unique_items
-from game_integration.factorio_bridge import execute_lua, is_error
+from game_integration.factorio_bridge import execute_lua
 from game_integration.starting_functions import get_player_inventory
+from game_integration.dependencies import get_client
+import factorio_rcon
+
 
 # ---------------------------------------------------------------------------
 # Raw resource base values — cannot be crafted, only extracted.
@@ -82,7 +85,7 @@ def alpha(n_ingredients: int) -> float:
     return 1.0 + (n_ingredients - 1) * 0.1
 
 
-def load_recipes(client=None) -> list[dict]:
+def load_recipes(client: factorio_rcon.RCONClient) -> list[dict]:
     """
     Fetch all recipe prototypes from the running Factorio server.
 
@@ -95,8 +98,8 @@ def load_recipes(client=None) -> list[dict]:
               "ingredients": [{"name": str, "amount": float}, ...],
               "products":    [{"name": str, "amount": float}, ...]}, ...]
     """
-    result = execute_lua(_LUA_LOAD_RECIPES.strip(), client)
-    if is_error(result) or not result["output"]:
+    result = execute_lua(client, _LUA_LOAD_RECIPES.strip())
+    if result['status'] == "ERROR" or not result["output"]:
         return []
     return json.loads(result["output"])
 
@@ -185,11 +188,7 @@ _previous_inventory: dict[str, int] = {}
 _value_table: dict[str, float] | None = None
 
 
-def compute_reward(
-    values: dict[str, float],
-    player_index: int = 1,
-    client=None,
-) -> tuple[float, dict[str, float]]:
+def compute_reward(client: factorio_rcon.RCONClient, values: dict[str, float], player_index: int = 1) -> tuple[float, dict[str, float]]:
     """
     Compute reward(t) = sum_i V(i) * (inventory_i[t] - inventory_i[t-1]).
 
@@ -211,7 +210,7 @@ def compute_reward(
     """
     global _previous_inventory
 
-    current = get_player_inventory(player_index, client)
+    current = get_player_inventory(client, player_index) # ???
 
     update_unique_items(current, _previous_inventory)
 
@@ -235,10 +234,7 @@ def compute_reward(
     return total, breakdown
 
 
-def get_reward(
-    player_index: int = 1,
-    client=None,
-) -> tuple[float, dict[str, float]]:
+def get_reward(client: factorio_rcon.RCONClient, player_index: int = 1) -> tuple[float, dict[str, float]]:
     """
     Compute and return reward(t) without requiring the caller to manage the
     value table.
@@ -257,9 +253,10 @@ def get_reward(
     global _value_table
     if _value_table is None:
         _value_table = build_value_table(load_recipes(client))
-    return compute_reward(_value_table, player_index, client)
+    return compute_reward(client, _value_table, player_index)
 
 
 
 if __name__ == "__main__":
-    get_reward()
+    client = get_client()
+    get_reward(client)

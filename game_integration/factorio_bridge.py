@@ -8,7 +8,6 @@ execute_lua(lua)           — run Lua inside pcall; returns output, "OK", or "E
 is_error(result)           — True if execute_lua returned an error string
 """
 
-import game_integration.cfg as cfg
 import factorio_rcon
 from game_integration.dependencies import get_client
 
@@ -32,7 +31,7 @@ def _escape_lua_string(s: str) -> str:
     )
 
 
-def execute_lua(lua: str, client: factorio_rcon.RCONClient) -> dict[str, str]:
+def execute_lua(client: factorio_rcon.RCONClient, lua: str) -> dict[str, str]:
     """
     Execute Lua code on the server with full error capture.
 
@@ -59,9 +58,9 @@ def execute_lua(lua: str, client: factorio_rcon.RCONClient) -> dict[str, str]:
     }
 
 
-def is_error(result: dict[str, str]) -> bool:
-    """Return True if execute_lua returned an error result."""
-    return result["status"] == "ERROR"
+# def is_error(result: dict[str, str]) -> bool:
+#     """Return True if execute_lua returned an error result."""
+#     return result["status"] == "ERROR"
 
 
 # ---------------------------------------------------------------------------
@@ -69,5 +68,5 @@ def is_error(result: dict[str, str]) -> bool:
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
     print("Connecting to Factorio RCON...")
-    get_client(host=cfg.HOST, port=cfg.PORT, password=cfg.PASSWORD)
+    get_client()
     print("Connected.\n")

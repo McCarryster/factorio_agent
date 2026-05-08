@@ -3,8 +3,9 @@ metrics/technologies.py — Technology research state queries via RCON.
 """
 
 from collections import deque
+import factorio_rcon
 
-from game_integration.factorio_bridge import execute_lua, is_error
+from game_integration.factorio_bridge import execute_lua
 
 _LUA_RESEARCHED = """
 local out = {}
@@ -29,7 +30,7 @@ rcon.print(table.concat(out, ','))
 """
 
 
-def get_technologies_researched(client=None) -> list[str]:
+def get_technologies_researched(client: factorio_rcon.RCONClient) -> list[str]:
     """
     Return names of all researched technologies for the player force.
 
@@ -39,13 +40,13 @@ def get_technologies_researched(client=None) -> list[str]:
     Returns:
         List of researched technology name strings.
     """
-    result = execute_lua(_LUA_RESEARCHED.strip(), client)
-    if is_error(result) or not result["output"]:
+    result = execute_lua(client, _LUA_RESEARCHED.strip())
+    if result["status"] == "ERROR" or not result["output"]:
         return []
     return [t for t in result["output"].split(",") if t]
 
 
-def get_tech_tree_depth(client=None) -> int:
+def get_tech_tree_depth(client: factorio_rcon.RCONClient) -> int:
     """
     Return the longest prerequisite chain among researched technologies.
 
@@ -67,8 +68,8 @@ def get_tech_tree_depth(client=None) -> int:
 
     prereqs: dict[str, list[str]] = {}
     for name in researched:
-        result = execute_lua((_LUA_PREREQUISITES % name).strip(), client)
-        raw = result["output"] if not is_error(result) else ""
+        result = execute_lua(client, (_LUA_PREREQUISITES % name).strip())
+        raw = result["output"] if result["status"] == "OK" else ""
         prereqs[name] = [p for p in raw.split(",") if p and p in researched]
 
     # dependents[p] = techs that list p as a prerequisite
