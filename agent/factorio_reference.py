@@ -26,4 +26,13 @@ Surface:
 Entity fuel:
   local fuel_inv = entity.get_fuel_inventory()
   fuel_inv.insert{name="coal", count=10}
+
+
+Entity placement — ALWAYS remove from inventory after create_entity or placement is invalid:
+  local entity = surface.create_entity{name="burner-mining-drill", position=pos, force="player"}
+  if entity then
+    player.get_main_inventory().remove{name="burner-mining-drill", count=1}
+  else
+    rcon.print("ERROR: placement failed")
+  end
 """

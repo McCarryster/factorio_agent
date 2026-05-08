@@ -1,64 +1,79 @@
 """
-TODO: description
+loop.py — Main agent loop with Langfuse tracing.
+
+Trace hierarchy per run:
+    factorio-agent (trace)
+    └── agent-step (span, repeated)
+        └── claude-response (generation)
 """
 
-
-# from agent.prompt import get_factorio_voyager_prompt
-from agent.prompt import PROMPT
+from anthropic.types import Message
 import anthropic
-from anthropic.types import MessageParam
-from game_integration.starting_functions import get_player_inventory, get_player_position
-from agent.utils import parse_agent_output, build_observation
+import factorio_rcon
+
+from langfuse import observe
+
+from agent.prompt import PROMPT
+from agent.utils import parse_agent_output
+from agent.state import AgentState, AgentStatus
+from agent.dependencies import get_anthropic_client
+from agent.model_calls import call_anthropic
+from agent.observability.build_observation import build_observation
 import agent.cfg as cfg
 from game_integration.factorio_bridge import execute_lua
-from metrics.all_metrics import get_all_metrics
-from typing import Any
+from game_integration.dependencies import get_client
 
 
-client = anthropic.Anthropic(api_key=cfg.API_KEY)
-# 1. call API
-# 2. extract code from response
-# 3. execute code
-# 4. observe result
-# 5. update history
-# 6. check if done
-def run(task: str, max_iterations: int = 10):
-    start_observation = build_observation(result=None, radius=64, start=True)
-    starting_observation = f"Task: {task}" + start_observation
-    history: list[MessageParam] = [{"role": "user", "content": starting_observation}]
-    for i in range(max_iterations):
-        # 1. Call API
-        response = client.messages.create(
-            model=cfg.DEFAULT_MODEL,
-            max_tokens=1024,
-            system=PROMPT,
-            messages=history
-        )
-        # response = """TextBlock(citations=None, text='<thought>\nI need to start playing Factorio from scratch with the goal of launching a rocket. Let me begin by understanding the current game state. I should:\n\n1. First, check what\'s available in my starting inventory\n2. Understand the current map/world state\n3. Identify available resources nearby\n4. Plan the initial steps to progress toward rocket launch\n\nTo launch a rocket, I\'ll eventually need to:\n- Build a rocket silo\n- Produce rocket parts and fuel\n- Research rocket technology\n- But first, I need basic infrastructure: mining, smelting, crafting, and power generation\n\nLet me start by querying the game state to see what I\'m working with.\n</thought>\n\n<action>\n-- Initial game state inspection\nlocal player = game.player\nlocal inventory = player.get_main_inventory()\nlocal position = player.position\n\n-- Log initial state\nlog("=== FACTORIO EXPEDITION START ===")\nlog("Player position: " .. serpent.block(position))\nlog("Inventory contents:")\nfor name, count in pairs(inventory.get_contents()) do\n    log("  " .. name .. ": " .. count)\nend\n\n-- Check technology progress\nlog("Researched technologies:")\nfor tech_name, tech in pairs(game.player_force.technologies) do\n    if tech.researched then\n        log("  " .. tech_name)\n    end\nend\n\n-- Get available recipes\nlog("Available recipes: " .. table.size(game.player_force.recipes))\n\n-- Check for nearby resources\nlog("Scanning nearby map for resources...")\nlocal surface = game.player.surface\nlog("Surface name: " .. surface.name)\n</action>\n\n<done>false</done>', type='text')"""
+client: anthropic.Anthropic = get_anthropic_client()
+factorio_client: factorio_rcon.RCONClient = get_client()
 
-        
-        # 2. extract code from response
-        parsed_response: dict[str, Any]= parse_agent_output(response.content[0].text) # type: ignore
-        # parsed_response: dict[str, Any]= parse_agent_output(response) # type: ignore
-        build_observation(result=None, radius=64, start=True) # makes before snapshot for reward
 
-        # 3. execute code
-        result = execute_lua(parsed_response['action'])
-        
-        # 4. observe result
-        observation = build_observation(result=result, radius=64, start=False) # makes after snapshot for result (delta)
+@observe(name="factorio-agent")
+def run(task: str, max_iterations: int = 20) -> AgentState:
+    state = AgentState(task=task)
+    state.history.append({
+        "role": "user",
+        "content": f"TASK: {task}" + build_observation(factorio_client, result=None, radius=64, start=True),
+    })
 
-        # 5. update history
-        # history.append({"role": "assistant", "content": response})
-        history.append({"role": "assistant", "content": response.content[0].text}) # type: ignore
-        history.append({"role": "user", "content": observation})
-
-        print(i, observation)
-        # print(f"Iteration {i} - \n", f"history - {history}")
-
-        if parsed_response["done"]:
-            print("Task was marked as DONE")
+    while not state.is_terminal:
+        if state.iteration >= max_iterations:
+            state.status = AgentStatus.LIMIT
             break
+        state = _step(state)
+        print(f"step = {state.iteration}")
+
+    return state
+
+@observe(name="agent-step")
+def _step(state: AgentState) -> AgentState:
+    state.iteration += 1
+
+    # THINK
+    response: Message = call_anthropic(
+        client=client, model=cfg.DEFAULT_MODEL,
+        max_tokens=1024, prompt=PROMPT, history=state.history,
+    )
+    parsed = parse_agent_output(response.content[0].text)  # type: ignore[union-attr]
+    state.last_action = parsed["action"]
+
+    # ACT
+    build_observation(factorio_client, result=None, radius=64, start=True) # takes inventory snapshot for proper reward calculation
+    result = execute_lua(factorio_client, parsed["action"])
+
+    # OBSERVE
+    observation = build_observation(factorio_client, result=result, radius=64, start=False)
+    state.last_observation = observation
+
+    # UPDATE HISTORY
+    state.history.append({"role": "assistant", "content": response.content[0].text})  # type: ignore[union-attr]
+    state.history.append({"role": "user",      "content": observation})
+
+    if parsed["done"]:
+        state.status = AgentStatus.DONE
+
+    return state
+
 
 
 if __name__ == "__main__":

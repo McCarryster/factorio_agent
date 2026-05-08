@@ -11,6 +11,12 @@ dotenv.load_dotenv()
 API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "")
 
 
+# Langfuse set up
+LANGFUSE_PUBLIC_KEY: str = os.getenv("LANGFUSE_PUBLIC_KEY", "")
+LANGFUSE_SECRET_KEY: str = os.getenv("LANGFUSE_SECRET_KEY", "")
+LANGFUSE_HOST: str = os.getenv("LANGFUSE_HOST", "")
+
+
 
 class Models(enum.Enum):
     """Available Anthropic Claude model versions."""
