@@ -1,262 +1,422 @@
 """
-metrics.py — Item value table and reward function for the Factorio agent.
+Factorio reward calculator (Factorio 2.0+ API).
 
-V(i) = min over recipes r that produce i:
-           (sum_j V(j) * c_{j,r}) * alpha(n_ingredients) / amount_of_i_in_r
+Implements:  V(i) = min_{r in R_i} ( (sum_{j in I_r} V(j) * c_{j,r}) * alpha(|I_r|) + E(r, C_r) )
 
-alpha(n) = 1 + (n - 1) * 0.1
+reward at step t = V_total(t) - V_total(t-1)
 
-reward(t) = sum_i V(i) * (P_i(t) - C_i(t))
-
-The value table is computed once at startup via build_value_table().
-reward() is called every N steps (configurable).
+NOTE: All Lua snippets below use rcon.print(...) to emit output,
+to match the project's execute_lua wrapper which does not capture
+return values from pcall.
 """
 
 import json
-from collections import defaultdict
-from metrics.unique_items import update_unique_items
-from game_integration.factorio_bridge import execute_lua
-from game_integration.starting_functions import get_player_inventory
-from game_integration.dependencies import get_client
+import math
+from typing import Optional
+
 import factorio_rcon
 
+# Use the project's existing wrapper:
+from game_integration.factorio_bridge import execute_lua
 
-# ---------------------------------------------------------------------------
-# Raw resource base values — cannot be crafted, only extracted.
-# ---------------------------------------------------------------------------
+# ============================================================
+# Tunable hyperparameters
+# ============================================================
 
-BASE_VALUES: dict[str, float] = {
-    "iron-ore": 1.0,
-    "copper-ore": 1.0,
-    "coal": 1.0,
-    "stone": 1.0,
-    "crude-oil": 2.0,
-    "water": 0.1,
+ALPHA_K = 0.1
+# Energy cost = ENERGY_SCALE * recipe_time_seconds. Tiny so it acts as a tie-breaker
+# rather than dominating ingredient cost. Tune up if you want the agent to care
+# about fast crafting, down if it shouldn't matter much.
+ENERGY_SCALE = 0.05
+DEFAULT_CRAFTER_POWER = 75_000  # kept for reference but no longer used directly
+
+
+def alpha(n: int) -> float:
+    return 1.0 + ALPHA_K * max(0, n - 1)
+
+
+# ============================================================
+# Raw resources (base case for V)
+# ============================================================
+
+RAW_VALUES: dict[str, float] = {
+    "iron-ore": 1.0, "copper-ore": 1.0, "stone": 1.0, "coal": 1.0,
+    "wood": 0.5, "raw-fish": 1.0, "uranium-ore": 8.0,
+    "crude-oil": 0.5, "water": 0.01, "steam": 0.05,
+    # Space Age raws
+    "calcite": 1.5, "tungsten-ore": 4.0, "scrap": 0.5,
+    "holmium-ore": 5.0, "lithium-brine": 1.0, "fluorine": 1.0,
+    "ammoniacal-solution": 0.5,
 }
 
-# ---------------------------------------------------------------------------
-# Lua script: serialise all recipe prototypes to a JSON array.
-#
-# Output schema per element:
-#   {"name": str,
-#    "ingredients": [{"name": str, "amount": float}, ...],
-#    "products":    [{"name": str, "amount": float}, ...]}
-#
-# "amount" for products is the *expected* amount:
-#   amount * probability  (or (min+max)/2 * probability for ranged products).
-# Recipes with no products are skipped.
-# ---------------------------------------------------------------------------
 
-_LUA_LOAD_RECIPES = """
-local out = {}
-for rname, recipe in pairs(prototypes.recipe) do
-  local ings = {}
-  for _, ing in ipairs(recipe.ingredients) do
-    ings[#ings+1] = '{"name":"' .. ing.name .. '","amount":' .. (ing.amount or 1) .. '}'
-  end
-  local prods = {}
-  for _, prod in ipairs(recipe.products) do
-    local amt = prod.amount
-    if amt == nil then
-      amt = ((prod.amount_min or 0) + (prod.amount_max or 0)) / 2
-    end
-    amt = amt * (prod.probability or 1)
-    if amt > 0 then
-      prods[#prods+1] = '{"name":"' .. prod.name .. '","amount":' .. amt .. '}'
-    end
-  end
-  if #prods > 0 then
-    out[#out+1] = ('{"name":"' .. rname
-      .. '","ingredients":[' .. table.concat(ings, ',')
-      .. '],"products":['    .. table.concat(prods, ',')
-      .. ']}')
-  end
+# ============================================================
+# Lua dumps — all use rcon.print() to emit output
+# ============================================================
+
+_LIST_RECIPE_NAMES_LUA = """
+local names = {}
+for name, _ in pairs(prototypes.recipe) do
+    names[#names+1] = name
 end
-rcon.print('[' .. table.concat(out, ',') .. ']')
+rcon.print(helpers.table_to_json(names))
+"""
+
+_DUMP_RECIPES_BATCH_LUA = """
+local names = helpers.json_to_table([==[__NAMES_JSON__]==])
+local out = {}
+for _, name in pairs(names) do
+    local proto = prototypes.recipe[name]
+    if proto then
+        local ingredients = {}
+        for _, ing in pairs(proto.ingredients or {}) do
+            ingredients[#ingredients+1] = { name = ing.name, amount = ing.amount, type = ing.type }
+        end
+        local products = {}
+        for _, prod in pairs(proto.products or {}) do
+            local amt = prod.amount
+            if amt == nil then
+                amt = ((prod.amount_min or 0) + (prod.amount_max or 0)) / 2
+            end
+            local prob = prod.probability or 1
+            products[#products+1] = { name = prod.name, amount = amt * prob, type = prod.type }
+        end
+        out[name] = {
+            ingredients = ingredients,
+            products = products,
+            energy = proto.energy,
+            category = proto.category,
+        }
+    end
+end
+rcon.print(helpers.table_to_json(out))
+"""
+
+_DUMP_ENTITY_TO_ITEM_LUA = """
+local entity_to_item = {}
+for name, proto in pairs(prototypes.item) do
+    if proto.place_result then
+        entity_to_item[proto.place_result.name] = name
+    end
+end
+rcon.print(helpers.table_to_json(entity_to_item))
 """
 
 
-# ---------------------------------------------------------------------------
-# Public functions
-# ---------------------------------------------------------------------------
-
-def alpha(n_ingredients: int) -> float:
-    """Complexity multiplier: penalises recipes that combine many ingredients."""
-    return 1.0 + (n_ingredients - 1) * 0.1
-
-
-def load_recipes(client: factorio_rcon.RCONClient) -> list[dict]:
-    """
-    Fetch all recipe prototypes from the running Factorio server.
-
-    Args:
-        client: RCON client. Uses the module-level connection if omitted.
-
-    Returns:
-        List of recipe dicts:
-            [{"name": str,
-              "ingredients": [{"name": str, "amount": float}, ...],
-              "products":    [{"name": str, "amount": float}, ...]}, ...]
-    """
-    result = execute_lua(client, _LUA_LOAD_RECIPES.strip())
-    if result['status'] == "ERROR" or not result["output"]:
-        return []
-    return json.loads(result["output"])
+def _safe_json_loads(s: str, ctx: str) -> dict | list:
+    if not s or not s.strip():
+        raise RuntimeError(f"{ctx}: Factorio returned empty string. "
+                           f"Possible RCON truncation — try smaller batch size.")
+    try:
+        return json.loads(s)
+    except json.JSONDecodeError as e:
+        preview = s[:200].replace("\n", " ")
+        raise RuntimeError(f"{ctx}: JSON decode failed ({e}). "
+                           f"Length={len(s)}, preview={preview!r}")
 
 
-def build_value_table(recipes: list[dict]) -> dict[str, float]:
-    """
-    Compute V(i) for every item/fluid reachable from BASE_VALUES.
+class RewardCalculator:
+    # Lower this if you see truncation. RCON typical limit is ~4 KB.
+    RECIPE_BATCH_SIZE = 30
 
-    Algorithm: Bellman-Ford relaxation over the recipe graph.
-    - Handles arbitrary cycles correctly (cyclic-only items converge to inf).
-    - Takes at most len(item_recipes) passes to converge.
+    def __init__(self, client: factorio_rcon.RCONClient):
+        self.client = client
+        self.recipes: dict = {}
+        self.entity_to_item: dict = {}
+        self.item_to_recipes: dict[str, list[str]] = {}
+        self.v_cache: dict[str, float] = {}
+        self.prev_total_v: Optional[float] = None
+        self.unique_items_produced: set[str] = set()
 
-    Args:
-        recipes: output of load_recipes().
+        self._load_recipe_data()
+        self._build_item_recipe_index()
+        self._precompute_all_values()
 
-    Returns:
-        {"item-name": float, ...}
-        Raw resources and all craftable items present.
-        Items unreachable from BASE_VALUES are absent from the dict.
-    """
-    # Index: item name → all recipes that produce it
-    item_recipes: dict[str, list[dict]] = defaultdict(list)
-    for recipe in recipes:
-        for product in recipe["products"]:
-            item_recipes[product["name"]].append(recipe)
+    # ---------- chunked recipe loading ----------
 
-    # Seed with raw resource values; everything else starts at infinity.
-    values: dict[str, float] = defaultdict(lambda: float("inf"))
-    values.update(BASE_VALUES)
+    def _load_recipe_data(self) -> None:
+        # 1. recipe names (small list)
+        result = execute_lua(self.client, _LIST_RECIPE_NAMES_LUA)
+        if result["status"] != "OK":
+            raise RuntimeError(f"Recipe-name listing failed: {result['output']}")
+        names = _safe_json_loads(result["output"], "recipe names")
+        if not isinstance(names, list):
+            raise RuntimeError(f"Expected list of names, got {type(names)}")
+        print(f"[reward] {len(names)} recipes to fetch")
 
-    # Relax until no value improves. In the worst case (a linear chain of
-    # length N) we need N passes, so cap at len(item_recipes) + 1.
-    for _ in range(len(item_recipes) + 1):
-        changed = False
-        for item, recipe_list in item_recipes.items():
-            best = values[item]
+        # 2. fetch recipe details in batches
+        merged: dict = {}
+        for i in range(0, len(names), self.RECIPE_BATCH_SIZE):
+            batch = names[i:i + self.RECIPE_BATCH_SIZE]
+            # JSON-encode and inject via replace (avoids str.format issues with Lua's {})
+            names_json = json.dumps(batch)
+            lua = _DUMP_RECIPES_BATCH_LUA.replace("__NAMES_JSON__", names_json)
+            result = execute_lua(self.client, lua)
+            if result["status"] != "OK":
+                raise RuntimeError(f"Batch {i} failed: {result['output']}")
+            batch_data = _safe_json_loads(
+                result["output"], f"recipe batch {i}-{i+len(batch)}"
+            )
+            merged.update(batch_data)
+        self.recipes = merged
 
-            for recipe in recipe_list:
-                # Per-unit cost: divide total recipe cost by how much of
-                # `item` this recipe actually produces.
-                item_amount = next(
-                    (p["amount"] for p in recipe["products"] if p["name"] == item),
-                    1.0,
+        # 3. entity_to_item map
+        result = execute_lua(self.client, _DUMP_ENTITY_TO_ITEM_LUA)
+        if result["status"] != "OK":
+            raise RuntimeError(f"entity_to_item dump failed: {result['output']}")
+        self.entity_to_item = _safe_json_loads(result["output"], "entity_to_item") # type: ignore
+
+    def _build_item_recipe_index(self) -> None:
+        # Categories whose recipes inflate item value because they produce
+        # things "from thin air" (recycling) or are special engine-internal recipes.
+        EXCLUDED_CATEGORIES = {
+            "recycling",
+            "captive-spawner-process",
+            "asteroid-collector",
+            "rocket-building",
+            "parameters",
+        }
+
+        for r_name, r in self.recipes.items():
+            cat = r.get("category") or ""
+            if cat in EXCLUDED_CATEGORIES:
+                continue
+            # Skip if recipe ends with "-recycling" even if mod authors used a different category
+            if r_name.endswith("-recycling"):
+                continue
+
+            products = r.get("products") or []
+            if not products:
+                continue
+
+            # Identify primary product: the one with the largest output amount.
+            # Byproducts (small probability/amount items) shouldn't count this recipe
+            # toward their value.
+            primary = max(products, key=lambda p: p.get("amount", 0) or 0)
+
+            for prod in products:
+                # Only index this recipe under items where the item is primary OR
+                # produces in equal amount (handles single-product recipes naturally).
+                if prod["name"] == primary["name"]:
+                    self.item_to_recipes.setdefault(prod["name"], []).append(r_name)
+
+    # ---------- V(i) ----------
+
+    def _energy_cost(self, recipe: dict) -> float:
+        # Energy proxied by recipe crafting time. Small coefficient so that
+        # ingredient cost dominates V; energy mainly distinguishes equally-priced recipes.
+        return (recipe["energy"] or 0.5) * ENERGY_SCALE
+
+    def V(self, item: str, _stack: Optional[set] = None) -> float:
+        if item in self.v_cache:
+            return self.v_cache[item]
+        if item in RAW_VALUES:
+            self.v_cache[item] = RAW_VALUES[item]
+            return RAW_VALUES[item]
+
+        if _stack is None:
+            _stack = set()
+        if item in _stack:
+            # Cycle: return inf so this branch is rejected by the min, but DO NOT cache.
+            return math.inf
+        _stack = _stack | {item}
+
+        recipe_names = self.item_to_recipes.get(item, [])
+        if not recipe_names:
+            # Truly no recipe: treat as raw with default value 1.0
+            self.v_cache[item] = 1.0
+            return 1.0
+
+        best = math.inf
+        for r_name in recipe_names:
+            r = self.recipes[r_name]
+            ingredients = r["ingredients"]
+
+            output_amount = 0.0
+            for prod in r["products"]:
+                if prod["name"] == item:
+                    output_amount += prod["amount"]
+            if output_amount <= 0:
+                continue
+
+            try:
+                ingredient_cost = sum(
+                    self.V(ing["name"], _stack) * ing["amount"] for ing in ingredients
                 )
-                if item_amount <= 0:
+            except RecursionError:
+                continue
+            if not math.isfinite(ingredient_cost):
+                continue  # one of the ingredients hit a cycle on this branch
+
+            total = (ingredient_cost * alpha(len(ingredients)) + self._energy_cost(r)) / output_amount
+            if total < best:
+                best = total
+
+        if math.isfinite(best):
+            self.v_cache[item] = best
+            return best
+        else:
+            # Every recipe was unreachable on this call due to cycles. Don't cache —
+            # the precompute pass below will resolve the order eventually.
+            return math.inf
+
+    def _precompute_all_values(self) -> None:
+        # Iterate to a fixed point. Items whose ingredients haven't been computed
+        # yet may return inf the first time; later passes find them.
+        for _ in range(5):
+            unresolved = 0
+            for item in list(self.item_to_recipes.keys()):
+                if item in self.v_cache:
                     continue
+                v = self.V(item)
+                if not math.isfinite(v):
+                    unresolved += 1
+            if unresolved == 0:
+                break
+        # Anything still unresolved gets a sentinel default
+        for item in self.item_to_recipes:
+            if item not in self.v_cache:
+                self.v_cache[item] = 1.0
 
-                ingredient_cost = 0.0
-                for ing in recipe["ingredients"]:
-                    v = values[ing["name"]]
-                    if v == float("inf"):
-                        ingredient_cost = float("inf")
-                        break
-                    ingredient_cost += v * ing["amount"]
+    # ---------- snapshot ----------
 
-                if ingredient_cost == float("inf"):
-                    continue
+    _SNAPSHOT_LUA = """
+    local p = game.players[1]
+    if not p or not p.character then
+        rcon.print(helpers.table_to_json({inv={}, world={}}))
+        return
+    end
+    local force = p.force
+    local surface = p.surface
 
-                n = len(recipe["ingredients"])
-                candidate = (ingredient_cost * alpha(n)) / item_amount
-                if candidate < best:
-                    best = candidate
-                    changed = True
+    local inv = {}
+    local function add(item, count)
+        if not item or not count or count == 0 then return end
+        inv[item] = (inv[item] or 0) + count
+    end
 
-            values[item] = best
+    local function read_inv(luainv)
+        if not luainv or not luainv.valid then return end
+        local contents = luainv.get_contents()
+        if not contents then return end
+        if contents[1] ~= nil and type(contents[1]) == "table" then
+            for _, entry in pairs(contents) do
+                add(entry.name, entry.count)
+            end
+        else
+            for name, count in pairs(contents) do
+                add(name, count)
+            end
+        end
+    end
 
-        if not changed:
-            break
+    for _, inv_type in pairs({
+        defines.inventory.character_main,
+        defines.inventory.character_guns,
+        defines.inventory.character_ammo,
+        defines.inventory.character_armor,
+        defines.inventory.character_trash,
+    }) do
+        read_inv(p.get_inventory(inv_type))
+    end
 
-    # Drop items that are still unreachable.
-    return {k: v for k, v in values.items() if v < float("inf")}
+    if p.crafting_queue then
+        for _, q in pairs(p.crafting_queue) do
+            if q.recipe then
+                local rp = prototypes.recipe[q.recipe]
+                if rp then
+                    for _, prod in pairs(rp.products or {}) do
+                        local amt = prod.amount or ((prod.amount_min or 0) + (prod.amount_max or 0)) / 2
+                        add(prod.name, (amt or 0) * (q.count or 1))
+                    end
+                end
+            end
+        end
+    end
 
+    local world = {}
+    for _, e in pairs(surface.find_entities_filtered{force = force}) do
+        if e.valid and e.type ~= "character" then
+            world[e.name] = (world[e.name] or 0) + 1
+            pcall(function() read_inv(e.get_output_inventory()) end)
+            pcall(function() read_inv(e.get_module_inventory()) end)
+            pcall(function() read_inv(e.get_fuel_inventory()) end)
+            if e.type == "container" or e.type == "logistic-container" or e.type == "infinity-container" then
+                pcall(function() read_inv(e.get_inventory(defines.inventory.chest)) end)
+            end
+            if e.type == "furnace" then
+                pcall(function() read_inv(e.get_inventory(defines.inventory.furnace_source)) end)
+            end
+            if e.type == "assembling-machine" then
+                pcall(function() read_inv(e.get_inventory(defines.inventory.assembling_machine_input)) end)
+            end
+        end
+    end
 
-# ---------------------------------------------------------------------------
-# Reward configuration
-# ---------------------------------------------------------------------------
-
-# How often the agent loop should call compute_reward() (every N steps).
-REWARD_INTERVAL: int = 60
-
-# Inventory snapshot from the previous compute_reward() call.
-# Delta between snapshots = net items produced minus items consumed.
-_previous_inventory: dict[str, int] = {}
-
-# Cached value table — built once on first get_reward() call.
-_value_table: dict[str, float] | None = None
-
-
-def compute_reward(client: factorio_rcon.RCONClient, values: dict[str, float], player_index: int = 1) -> tuple[float, dict[str, float]]:
+    rcon.print(helpers.table_to_json({inv = inv, world = world}))
     """
-    Compute reward(t) = sum_i V(i) * (inventory_i[t] - inventory_i[t-1]).
 
-    Approximates P_i(t) - C_i(t) as the net change in player inventory
-    between successive calls. Items that increased contribute positively
-    (net production); items that decreased contribute negatively (net
-    consumption / crafting cost).
+    def _snapshot(self) -> tuple[dict[str, int], dict[str, int]]:
+        result = execute_lua(self.client, self._SNAPSHOT_LUA)
+        if result["status"] != "OK":
+            raise RuntimeError(f"Snapshot failed: {result['output']}")
+        data = _safe_json_loads(result["output"], "snapshot")
+        return data.get("inv") or {}, data.get("world") or {} # type: ignore
 
-    Args:
-        values: precomputed value table from build_value_table().
-        player_index: 1-based player index (default 1).
-        client: RCON client. Uses module-level connection if omitted.
+    # ---------- aggregation ----------
 
-    Returns:
-        (total_reward, breakdown)
-          total_reward — float, weighted sum of inventory deltas
-          breakdown    — {item_name: contribution}, non-zero entries only,
-                         sorted by descending absolute contribution.
-    """
-    global _previous_inventory
+    def _total_v(self, inv: dict[str, int], world: dict[str, int]) -> float:
+        total = 0.0
+        for item, count in inv.items():
+            v = self.V(item)
+            if math.isfinite(v):
+                total += v * count
+        for entity, count in world.items():
+            item = self.entity_to_item.get(entity, entity)
+            v = self.V(item)
+            if math.isfinite(v):
+                total += v * count
+        return total
 
-    current = get_player_inventory(client, player_index) # ???
+    # ---------- public API ----------
 
-    update_unique_items(current, _previous_inventory)
+    def reset(self) -> None:
+        inv, world = self._snapshot()
+        self.prev_total_v = self._total_v(inv, world)
 
-    all_items = set(current) | set(_previous_inventory)
-    breakdown: dict[str, float] = {}
-    for name in all_items:
-        v = values.get(name)
-        if v is None:
-            continue
-        delta = current.get(name, 0) - _previous_inventory.get(name, 0)
-        contribution = v * delta
-        if contribution != 0.0:
-            breakdown[name] = contribution
+    def get_reward(self) -> float:
+        inv, world = self._snapshot()
 
-    _previous_inventory = dict(current)
+        # update unique items from current inventory
+        for item in inv:
+            self.unique_items_produced.add(item)
 
-    total = sum(breakdown.values())
-    breakdown = dict(
-        sorted(breakdown.items(), key=lambda kv: abs(kv[1]), reverse=True)
-    )
-    return total, breakdown
-
-
-def get_reward(client: factorio_rcon.RCONClient, player_index: int = 1) -> tuple[float, dict[str, float]]:
-    """
-    Compute and return reward(t) without requiring the caller to manage the
-    value table.
-
-    Builds the value table from Factorio recipe prototypes on the first call
-    and caches it for all subsequent calls. Drop-in convenience wrapper around
-    load_recipes / build_value_table / compute_reward.
-
-    Args:
-        player_index: 1-based player index (default 1).
-        client: RCON client. Uses module-level connection if omitted.
-
-    Returns:
-        (total_reward, breakdown) — same as compute_reward().
-    """
-    global _value_table
-    if _value_table is None:
-        _value_table = build_value_table(load_recipes(client))
-    return compute_reward(client, _value_table, player_index)
+        current_v = self._total_v(inv, world)
+        if self.prev_total_v is None:
+            self.prev_total_v = current_v
+            return 0.0
+        reward = current_v - self.prev_total_v
+        self.prev_total_v = current_v
+        return reward
 
 
+# ============================================================
+# Demo
+# ============================================================
 
 if __name__ == "__main__":
+    import time
+    from game_integration.factorio_bridge import get_client
+
     client = get_client()
-    get_reward(client)
+    calc = RewardCalculator(client)
+    print(f"Loaded {len(calc.recipes)} recipes, {len(calc.entity_to_item)} entity mappings")
+    calc.reset()
+
+    reward = calc.get_reward()
+    print(f"Baseline taken {reward}")
+
+    execute_lua(client, "game.players[1].insert{name='stone-wall', count=2}")
+    time.sleep(1)
+    reward = calc.get_reward()
+    print(f"Delta reward {reward}")

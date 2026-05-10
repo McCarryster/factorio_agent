@@ -39,3 +39,26 @@ def get_skill_names(skills_dir: Path) -> list[str]:
     if not p.is_dir():
         return []
     return sorted(f.stem for f in p.iterdir() if f.suffix == ".lua")
+
+
+def get_skills_for_prompt(skills_dir: Path) -> str:
+    p = Path(skills_dir)
+    if not p.is_dir():
+        return "No skills available."
+    
+    skills = []
+    for f in sorted(p.glob("*.lua")):
+        code = f.read_text(encoding="utf-8")
+        skills.append(f"### {f.stem}\n```lua\n{code}\n```")
+    
+    return "\n\n".join(skills) if skills else "No skills available."
+
+
+if __name__ == "__main__":
+    import agent.cfg as cfg
+
+    obs = f"""
+AVAILABLE SKILLS (TOTAL {get_skill_library_size(cfg.SKILLS_DIR)}):
+{get_skills_for_prompt(cfg.SKILLS_DIR)}
+"""
+    print(obs)

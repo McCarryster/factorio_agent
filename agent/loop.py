@@ -7,16 +7,13 @@ Trace hierarchy per run:
         └── claude-response (generation)
 """
 
-import re
 
 from anthropic.types import Message, TextBlock
 import anthropic
 import factorio_rcon
-
 from langfuse import observe
-
-from agent.prompt import SYSTEM_PROMPT, SKILL_SAVE_PROMPT
-from agent.utils import parse_agent_output
+from agent.prompt.prompt import SYSTEM_PROMPT
+from agent.utils import parse_agent_output, save_skill, reuse_skill
 from agent.state import AgentState, AgentStatus
 from agent.dependencies import get_anthropic_client
 from agent.model_calls import call_anthropic
@@ -24,9 +21,15 @@ from agent.observability.build_observation import build_observation
 import agent.cfg as cfg
 from game_integration.factorio_bridge import execute_lua
 from game_integration.dependencies import get_client
+from game_integration.lua_validator import validate_lua, has_blocking, format_issues
+from metrics.skill_reuse import record_execution
+from metrics.reward_t import RewardCalculator
+# from metrics.reward_diagnose import DiagnosticRewardCalculator as RewardCalculator
+
 
 client: anthropic.Anthropic = get_anthropic_client()
 factorio_client: factorio_rcon.RCONClient = get_client()
+reward_calc: RewardCalculator = RewardCalculator(factorio_client)
 
 
 def _windowed_history(
@@ -38,47 +41,19 @@ def _windowed_history(
     return [history[0]] + history[-window:]
 
 
-@observe(name="skill-save")
-def maybe_save_skill(lua_code: str, result: dict[str, str]) -> None:
-    """Ask Claude whether the executed Lua should be saved as a reusable skill."""
-    if result["status"] == "ERROR":
-        return
-
-    prompt = SKILL_SAVE_PROMPT.replace("<code>", f"\n```lua\n{lua_code}\n```\n")
-    response: Message = client.messages.create(
-        model=cfg.DEFAULT_MODEL,
-        max_tokens=128,
-        messages=[{"role": "user", "content": prompt}],
-    )
-
-    text_block = next((b for b in response.content if isinstance(b, TextBlock)), None)
-    if not text_block:
-        return
-
-    text = text_block.text
-    name_match = re.search(r"<skill_name>(.*?)</skill_name>", text, re.DOTALL)
-    desc_match = re.search(r"<skill_description>(.*?)</skill_description>", text, re.DOTALL)
-
-    if not name_match:
-        return
-
-    skill_name = name_match.group(1).strip()
-    skill_desc = desc_match.group(1).strip() if desc_match else ""
-
-    cfg.SKILLS_DIR.mkdir(exist_ok=True)
-    (cfg.SKILLS_DIR / f"{skill_name}.lua").write_text(
-        f"-- {skill_desc}\n{lua_code}", encoding="utf-8"
-    )
-    print(f"skill saved: {skill_name}")
-
-
 @observe(name="factorio-agent")
-def run(task: str, max_iterations: int = 20, history_window: int | None = None) -> AgentState:
+def run(task: str, max_iterations: int = 100, history_window: int | None = None) -> AgentState:
     """Run the agent loop for a given task."""
     state = AgentState(task=task, history_window=history_window)
+    # Establish reward baseline at episode start. The first observation
+    # below will produce reward=0 (or close to it) by design.
+    reward_calc.reset()
     state.history.append({
         "role": "user",
-        "content": f"TASK: {task}" + build_observation(factorio_client, result=None, radius=64, skills_dir=cfg.SKILLS_DIR, start=True),
+        "content": f"TASK: {task}" + build_observation(
+            client=factorio_client, reward_calc=reward_calc,
+            result=None, skills_dir=cfg.SKILLS_DIR, start=True,
+        ),
     })
 
     while not state.is_terminal:
@@ -98,7 +73,7 @@ def _step(state: AgentState) -> AgentState:
     # THINK
     response: Message = call_anthropic(
         client=client, model=cfg.DEFAULT_MODEL,
-        max_tokens=1024, prompt=SYSTEM_PROMPT,
+        max_tokens=cfg.MAX_TOKENS, prompt=SYSTEM_PROMPT,
         history=_windowed_history(state.history, state.history_window),
     )
     text_block = next((b for b in response.content if isinstance(b, TextBlock)), None)
@@ -108,18 +83,51 @@ def _step(state: AgentState) -> AgentState:
     parsed = parse_agent_output(text_block.text)
     state.last_action = parsed["action"]
 
-    # ACT — pre-snapshot so reward delta is calculated correctly
-    build_observation(factorio_client, result=None, radius=64, skills_dir=cfg.SKILLS_DIR, start=True)
-    result = execute_lua(factorio_client, parsed["action"])
-    maybe_save_skill(parsed["action"], result)
+    # VALIDATE — block forbidden patterns before they touch the game
+    issues = validate_lua(parsed["action"])
+    if has_blocking(issues):
+        fake_result = {
+            "status": "ERROR",
+            "output": "ACTION REJECTED — Lua validator detected forbidden patterns:\n"
+                      + format_issues(issues)
+                      + "\n\nFix the code so items come from legitimate sources "
+                        "(mining, crafting, or inventories you own) and resubmit.",
+        }
+        observation = build_observation(
+            client=factorio_client, reward_calc=reward_calc,
+            result=fake_result, skills_dir=cfg.SKILLS_DIR, start=False,
+        )
+        state.last_observation = observation
+        state.history.append({"role": "assistant", "content": text_block.text})
+        state.history.append({"role": "user", "content": observation})
+        return state
+
+    # ACT
+    if parsed["skill_reused"] == "false":
+        result = execute_lua(factorio_client, parsed["action"])
+        # Save only if it ran cleanly AND has no blocking issues (defensive — should be impossible here)
+        if result["status"] == "OK":
+            save_skill(parsed["new_skill_name"], parsed["action"])
+    elif parsed["skill_reused"] == "true":
+        result = reuse_skill(factorio_client, parsed["existing_skill_name"])
+        record_execution(from_library=True)
+    else:
+        result = execute_lua(factorio_client, parsed["action"])
+
+    # Append non-blocking warnings to the result so the agent sees them
+    warns = [i for i in issues if i.severity == "WARN"]
+    if warns:
+        result["output"] = (result.get("output") or "") + "\n[validator warnings]\n" + format_issues(warns)
 
     # OBSERVE
-    observation = build_observation(factorio_client, result=result, radius=64, skills_dir=cfg.SKILLS_DIR, start=False)
+    observation = build_observation(
+        client=factorio_client, reward_calc=reward_calc,
+        result=result, skills_dir=cfg.SKILLS_DIR, start=False,
+    )
     state.last_observation = observation
 
-    # UPDATE HISTORY
     state.history.append({"role": "assistant", "content": text_block.text})
-    state.history.append({"role": "user",      "content": observation})
+    state.history.append({"role": "user", "content": observation})
 
     if parsed["done"]:
         state.status = AgentStatus.DONE
@@ -128,7 +136,8 @@ def _step(state: AgentState) -> AgentState:
 
 
 if __name__ == "__main__":
-    task = "Place the burner-mining-drill on an iron ore patch and the stone-furnace next to it. Add coal to both."
-    max_iterations = 20
+    # task = "Place the burner-mining-drill on an iron ore patch and the stone-furnace next to it. Add fuel to both."
+    task = "Set up an automated iron production line: mine iron ore with a burner miner, smelt it into iron plates with a furnace, and ensure coal fuels the miner automatically"
+    max_iterations = 50
     history_window = 8
     run(task, max_iterations, history_window)

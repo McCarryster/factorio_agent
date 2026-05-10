@@ -1,4 +1,4 @@
-factorio_lua_ref = """
+FACTORIO_LUA_REF = """
 FACTORIO 2.x LUA REFERENCE
 
 Output:
