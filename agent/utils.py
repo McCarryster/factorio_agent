@@ -20,7 +20,7 @@ def parse_agent_output(text: str) -> dict[str, Any]:
         <skill_reused>none|true|false</skill_reused>
         <skill_name>name</skill_name>         (only when skill_reused=true)
         <new_skill_name>name</new_skill_name> (only when skill_reused=false)
-        <done>false|true</done>
+        <task_complete>false|true</task_complete>
 
     Returns:
         {
@@ -29,7 +29,7 @@ def parse_agent_output(text: str) -> dict[str, Any]:
             "skill_reused":   "none" | "true" | "false",
             "skill_name":     str | None,
             "new_skill_name": str | None,
-            "done":           bool,
+            "task_complete":           bool,
         }
     """
 
@@ -45,7 +45,7 @@ def parse_agent_output(text: str) -> dict[str, Any]:
         "skill_reused":   skill_reused_raw,
         "existing_skill_name": extract("existing_skill_name") if skill_reused_raw == "true" else None,
         "new_skill_name": extract("new_skill_name") if skill_reused_raw == "false" else None,
-        "done":           (extract("done") or "").lower() == "true",
+        "task_complete":           (extract("task_complete") or "").lower() == "true",
     }
 
 

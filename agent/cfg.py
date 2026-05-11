@@ -31,4 +31,4 @@ DEFAULT_MODEL: str = Models.CLAUDE_HAIKU_4_5.value
 MAX_TOKENS: int = 2048
 
 # Path to look for or save skills
-SKILLS_DIR = Path(__file__).resolve().parent.parent / "skills"
+SKILLS_DIR: Path = Path(__file__).resolve().parent.parent / "skills"

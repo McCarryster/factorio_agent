@@ -5,15 +5,14 @@ model_calls.py — LLM API call with Langfuse generation tracing.
 import anthropic
 from anthropic.types import MessageParam, Message, TextBlock
 from langfuse import get_client, observe
+import agent.cfg as cfg
 
 langfuse = get_client()
 
 
-@observe(name="claude-response", as_type="generation")
+@observe(name="claude_response", as_type="generation")
 def call_anthropic(
     client: anthropic.Anthropic,
-    model: str,
-    max_tokens: int,
     prompt: str,
     history: list[MessageParam],
 ) -> Message:
@@ -30,11 +29,11 @@ def call_anthropic(
     Returns:
         The raw Anthropic Message response.
     """
-    langfuse.update_current_generation(model=model, input=[{"role": "system", "content": prompt}] + history)
+    langfuse.update_current_generation(model=cfg.DEFAULT_MODEL, input=[{"role": "system", "content": prompt}] + history)
 
     result = client.messages.create(
-        model=model,
-        max_tokens=max_tokens,
+        model=cfg.DEFAULT_MODEL,
+        max_tokens=cfg.MAX_TOKENS,
         system=prompt,
         messages=history,
     )

@@ -16,7 +16,7 @@ from agent.prompt.prompt import SYSTEM_PROMPT
 from agent.utils import parse_agent_output, save_skill, reuse_skill
 from agent.state import AgentState, AgentStatus
 from agent.dependencies import get_anthropic_client
-from agent.model_calls import call_anthropic
+from agent.model_call import call_anthropic
 from agent.observability.build_observation import build_observation
 import agent.cfg as cfg
 from game_integration.factorio_bridge import execute_lua
@@ -68,6 +68,7 @@ def run(task: str, max_iterations: int = 100, history_window: int | None = None)
 
 @observe(name="agent-step")
 def _step(state: AgentState) -> AgentState:
+
     state.iteration += 1
 
     # THINK
@@ -129,7 +130,7 @@ def _step(state: AgentState) -> AgentState:
     state.history.append({"role": "assistant", "content": text_block.text})
     state.history.append({"role": "user", "content": observation})
 
-    if parsed["done"]:
+    if parsed["task_complete"]:
         state.status = AgentStatus.DONE
 
     return state
