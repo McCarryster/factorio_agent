@@ -11,20 +11,20 @@ from anthropic.types import MessageParam, Message, TextBlock
 from enum import Enum
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from langfuse import observe
 
 import agent.cfg as cfg
-from agent.prompt import executor_prompt
+from agent.prompt import executor_prompt, planner_prompt
 from agent.model_call import call_anthropic
-from agent.utils import parse_agent_output, save_skill, reuse_skill
+from agent.utils import parse_executor_agent_output, parse_planner_agent_output, save_skill, reuse_skill
 from metrics.skill_reuse import record_execution
 from game_integration.lua_validator import validate_lua, has_blocking, format_issues
 from game_integration.factorio_bridge import execute_lua
 from metrics.reward_t import RewardCalculator
-from observability.build_observation import build_observation
+from observability.build_observation import build_observation, get_world_state
 # from metrics.reward_diagnose import DiagnosticRewardCalculator as RewardCalculator
-
 
 
 class AgentStatus(Enum):
@@ -72,7 +72,7 @@ class Executor:
         self.factorio_client: factorio_rcon.RCONClient = factorio_client
         self.reward_calc: RewardCalculator = reward_calc
         self.skills_dir: Path = skills_dir
-        self.state: ExecutorState = ExecutorState()
+        # self.state: ExecutorState = ExecutorState()
 
     def _windowed_history(self, history: list, window: int | None) -> list:
         """Return [first_msg] + last `window` messages, or full history if window is None."""
@@ -82,6 +82,7 @@ class Executor:
 
     @observe(name="executor_agent_run")
     def run(self, task: str, max_iterations: int, history_window: int) -> ExecutorState:
+        # Agent initialization
         self.state = ExecutorState(task=task)
         self.reward_calc.reset()
         self.state.history.append({
@@ -92,11 +93,12 @@ class Executor:
             ),
         })
 
+        # Agent loop
         while self.state.status == AgentStatus.RUNNING:
             if self.state.iteration >= max_iterations:
                 self.state.status = AgentStatus.LIMIT
                 break
-            state = self._step(self.state, history_window)
+            state = self._step(history_window)
             print(f"step = {state.iteration}")
         return self.state
 
@@ -113,7 +115,7 @@ class Executor:
         if not text_block:
             return self.state
 
-        parsed = parse_agent_output(text_block.text)
+        parsed: dict[str, Any] = parse_executor_agent_output(text_block.text)
         self.state.last_action = parsed["action"]
 
         # VALIDATE - block forbidden patterns before they touch the game
@@ -130,10 +132,10 @@ class Executor:
                 client=self.factorio_client, reward_calc=self.reward_calc,
                 result=fake_result, skills_dir=self.skills_dir, start=False,
             )
-            state.last_observation = observation
-            state.history.append({"role": "assistant", "content": text_block.text})
-            state.history.append({"role": "user", "content": observation})
-            return state
+            self.state.last_observation = observation
+            self.state.history.append({"role": "assistant", "content": text_block.text})
+            self.state.history.append({"role": "user", "content": observation})
+            return self.state
 
         # ACT
         if parsed["skill_reused"] == "false":
@@ -169,12 +171,33 @@ class Executor:
 
 
 class Planner:
-    def __init__(self, anthropic_client: anthropic.Anthropic):
+    def __init__(self, 
+                 anthropic_client: anthropic.Anthropic,
+                 factorio_client: factorio_rcon.RCONClient,
+                 skills_dir: Path):
         self.anthropic_client: anthropic.Anthropic = anthropic_client
-        self.state: PlannerState = PlannerState()
+        self.factorio_client: factorio_rcon.RCONClient = factorio_client
+        self.skills_dir: Path = skills_dir
 
-    def create_plan(self, goal: str, world_state: dict) -> list[str]:
-        ...
+    def create_plan(self, task: str) -> PlannerState:
+        self.state = PlannerState(goal=task)
+        world_state: str = get_world_state(client=self.factorio_client, radius=64, skills_dir=self.skills_dir)
+        content = f"GOAL: {task}\n\n{world_state}"
+
+        response: Message = call_anthropic(
+            client=self.anthropic_client, prompt=planner_prompt.PLANNER_PROMPT,
+            history=[{"role": "user", "content": content}],
+        )
+        text_block = next((b for b in response.content if isinstance(b, TextBlock)), None)
+        if not text_block:
+            return self.state
+
+        parsed: dict[str, Any] = parse_planner_agent_output(text_block.text)
+        self.state.reasoning = parsed['reasoning']
+        self.state.plan = parsed['plan']
+
+        return self.state
+
     def replan(self, ...) -> list[str]:
         ...
 

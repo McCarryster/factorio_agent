@@ -10,7 +10,12 @@ import re
 import factorio_rcon
 
 
-def parse_agent_output(text: str) -> dict[str, Any]:
+
+def _extract(tag: str, text: str) -> str | None:
+    m = re.search(rf"<{tag}>(.*?)</{tag}>", text, re.DOTALL)
+    return m.group(1).strip() if m else None
+
+def parse_executor_agent_output(text: str) -> dict[str, Any]:
     """
     Parse agent XML response into a structured dict.
 
@@ -33,20 +38,32 @@ def parse_agent_output(text: str) -> dict[str, Any]:
         }
     """
 
-    def extract(tag: str) -> str | None:
-        m = re.search(rf"<{tag}>(.*?)</{tag}>", text, re.DOTALL)
-        return m.group(1).strip() if m else None
-
-    skill_reused_raw = extract("skill_reused") or "none"
+    skill_reused_raw = _extract("skill_reused", text) or "none"
 
     return {
-        "thought":        extract("thought") or "",
-        "action":         extract("action") or "",
-        "skill_reused":   skill_reused_raw,
-        "existing_skill_name": extract("existing_skill_name") if skill_reused_raw == "true" else None,
-        "new_skill_name": extract("new_skill_name") if skill_reused_raw == "false" else None,
-        "task_complete":           (extract("task_complete") or "").lower() == "true",
+        "thought": _extract("thought", text) or "",
+        "action": _extract("action", text) or "",
+        "skill_reused": skill_reused_raw,
+        "existing_skill_name": _extract("existing_skill_name", text) if skill_reused_raw == "true" else None,
+        "new_skill_name": _extract("new_skill_name", text) if skill_reused_raw == "false" else None,
+        "task_complete": (_extract("task_complete", text) or "").lower() == "true",
     }
+
+def parse_planner_agent_output(text: str) -> dict:
+    """
+    TODO: description
+    """
+    reasoning = _extract("reasoning", text) or ""
+    plan_text = _extract("plan", text)
+    
+    # Parse the plan into a list by splitting on numbered lines
+    if plan_text:
+        # Splits by "1. ", "2. ", etc., while removing empty strings
+        plan = [line.strip() for line in re.split(r'\d+\.\s+', plan_text) if line.strip()]
+    else:
+        plan = []
+        
+    return {"reasoning": reasoning, "plan": plan}
 
 
 def save_skill(skill_name: str, lua_code: str) -> None:
@@ -64,3 +81,9 @@ def reuse_skill(factorio_client: factorio_rcon.RCONClient, skill_name: str) -> d
     lua_code = skill_file.read_text(encoding="utf-8")
     print(f"skill reused: {skill_name}")
     return execute_lua(factorio_client, lua_code)
+
+
+if __name__ == "__main__":
+    from agent.prompt import planner_prompt
+    parsed = parse_planner_agent_output(planner_prompt.PLANNER_PROMPT)
+    print(parsed)
