@@ -21,7 +21,7 @@ The executor agent:
 
 Subtask guidelines:
 - Each subtask must be concrete and verifiable
-- Subtasks should be achievable in 1-5 executor iterations
+- Subtasks should be achievable in 1-10 executor iterations
 - Order subtasks by dependency (later tasks depend on earlier ones)
 - Reference existing skills when they apply
 

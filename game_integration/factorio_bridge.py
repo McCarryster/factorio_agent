@@ -9,7 +9,7 @@ is_error(result)           — True if execute_lua returned an error string
 """
 
 import factorio_rcon
-from game_integration.dependencies import get_client
+from game_integration.dependencies import get_factorio_client
 
 
 
@@ -68,5 +68,5 @@ def execute_lua(client: factorio_rcon.RCONClient, lua: str) -> dict[str, str]:
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
     print("Connecting to Factorio RCON...")
-    get_client()
+    get_factorio_client()
     print("Connected.\n")

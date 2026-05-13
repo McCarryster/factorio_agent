@@ -2,7 +2,7 @@
 TODO: description
 """
 
-from game_integration.starting_functions import get_player_inventory, get_player_position, get_nearby_cluster_resources
+from game_integration.starting_functions import get_player_inventory, get_player_position, get_nearby_cluster_resources, get_local_map
 from metrics.all_metrics import get_all_metrics
 from metrics.milestones import get_entities_placed
 from metrics.skill_library import get_skills_for_prompt, get_skill_library_size
@@ -24,13 +24,15 @@ def build_observation(client: factorio_rcon.RCONClient,
 
     inventory = get_player_inventory(client)
     pos = get_player_position(client)
+    local_map = get_local_map(client, radius=30)
     metrics = get_all_metrics(client, reward_calc, skills_dir=skills_dir)
 
     core_obs = f"""
 INVENTORY: {", ".join([f"{k}: {v}" for k, v in inventory.items()])}.
 CHARACTER POSITION: {pos["x"], pos["y"]}.
-AVAILABLE SKILLS ({metrics['skill_library_size']} TOTAL):
-    {get_skills_for_prompt(skills_dir)}
+
+{local_map}
+
 METRICS:
     reward this step: {metrics['reward']}
     unique items seen: {metrics['unique_items_produced']}
@@ -38,6 +40,9 @@ METRICS:
     technologies researched: {metrics['technologies_researched']}
     technology tree depth: {metrics['tech_tree_depth']}
     skill reuse rate: {metrics['skill_reuse_rate']}
+
+AVAILABLE SKILLS ({metrics['skill_library_size']} TOTAL):
+    {get_skills_for_prompt(skills_dir)}
     """
 
     if start:
@@ -82,10 +87,10 @@ AVAILABLE SKILLS ({library_size} TOTAL):
 
 
 if __name__ == "__main__":
-    from game_integration.dependencies import get_client
+    from game_integration.dependencies import get_factorio_client
     import agent.cfg as cfg
 
-    factorio_client: factorio_rcon.RCONClient = get_client()
+    factorio_client: factorio_rcon.RCONClient = get_factorio_client()
 
     obs = get_world_state(client=factorio_client, radius=64, skills_dir=cfg.SKILLS_DIR)
     print(obs)

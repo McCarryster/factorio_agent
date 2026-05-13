@@ -3,15 +3,17 @@ model_calls.py — LLM API call with Langfuse generation tracing.
 """
 
 import anthropic
+from anthropic import APIStatusError
 from anthropic.types import MessageParam, Message, TextBlock
 from langfuse import get_client, observe
 import agent.cfg as cfg
+import time
+
 
 langfuse = get_client()
 
-
 @observe(name="claude_response", as_type="generation")
-def call_anthropic(
+def call(
     client: anthropic.Anthropic,
     prompt: str,
     history: list[MessageParam],
@@ -48,3 +50,26 @@ def call_anthropic(
     )
 
     return result
+
+
+def call_anthropic(
+    client: anthropic.Anthropic,
+    prompt: str,
+    history: list[MessageParam],
+    max_retries: int = 3,
+) -> Message:
+    last_error: Exception | None = None
+    for attempt in range(max_retries):
+        try:
+            return call(client, prompt, history)
+        except APIStatusError as e:
+            if e.status_code == 529:
+                if attempt == max_retries - 1:
+                    raise
+                wait = 2 ** attempt
+                print(f"API overloaded, retrying in {wait}s...")
+                time.sleep(wait)
+                last_error = e
+            else:
+                raise
+    raise last_error  # type: ignore

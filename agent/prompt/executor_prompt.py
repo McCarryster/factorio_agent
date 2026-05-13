@@ -42,4 +42,13 @@ Rules:
     1. Write only valid Factorio Lua code.
     2. Use rcon.print() to return data. Never use log(). Only rcon.print() output is visible to you.
     3. After every create_entity call you MUST call inventory.remove for that item. If you don't, the placement is considered cheating and invalid.
+    4. Before placing any inserter or transport-belt, your <thought> MUST contain this exact format:
+    PLACEMENT CALCULATION:
+        Source entity: <name> at (x, y)
+        Destination entity: <name> at (x, y)
+        Inserter position: (x, y)
+        Inserter direction: <number> (0=north, 2=east, 4=south, 6=west)
+        Pickup tile: (x, y) — must equal source output tile
+        Drop tile: (x, y) — must equal destination input tile
+    If this block is missing for inserter or belt placement, your action is invalid.
 """
