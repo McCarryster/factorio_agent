@@ -20,16 +20,17 @@ from agent.prompt import executor_prompt, planner_prompt
 from agent.model_call import call_anthropic
 from agent.utils import parse_executor_agent_output, parse_planner_agent_output, save_skill, reuse_skill
 from metrics.skill_reuse import record_execution
+from metrics.skill_library import get_skill_names
+from metrics.entity_status import get_entity_status, format_entity_status
 from game_integration.lua_validator import validate_lua, has_blocking, format_issues
 from game_integration.factorio_bridge import execute_lua
-from observability.build_observation import build_observation, get_world_state
-from metrics.reward_t import RewardCalculator
-# from metrics.reward_diagnose import DiagnosticRewardCalculator as RewardCalculator
+from observability.build_observation import build_observation
+from metrics.production_tracker import ProductionTracker
 
 
 
 # ============================================================
-# Dataclasses
+# Dataclasses for states
 # ============================================================
 
 class AgentStatus(Enum):
@@ -50,18 +51,17 @@ class ExecutorState:
 
 @dataclass
 class PlannerState:
-    """State for one planning call."""
-    goal: str = "" # the overall user goal
-    plan: list[str] = field(default_factory=list)
+    goal: str = ""
     reasoning: str = ""
+    plan: list[dict] = field(default_factory=list)
+    status: AgentStatus = AgentStatus.RUNNING
 
 @dataclass
 class OrchestratorState:
-    """State across the whole multi-agent run."""
-    goal: str
-    plan: list[str] = field(default_factory=list)
-    completed_subtasks: list[str] = field(default_factory=list)
-    failed_subtasks: list[tuple[str, str]] = field(default_factory=list)  # (task, reason)
+    goal: str = ""
+    plan: list[dict] = field(default_factory=list)
+    completed_subtasks: list[dict] = field(default_factory=list)
+    failed_subtasks: list[tuple[dict, str]] = field(default_factory=list)
     current_subtask_index: int = 0
     replan_count: int = 0
     max_replans: int = 3
@@ -82,11 +82,11 @@ class VerifierState:
 class ExecutorAgent:
     def __init__(self, anthropic_client: anthropic.Anthropic,
                  factorio_client: factorio_rcon.RCONClient,
-                 reward_calc: RewardCalculator,
+                 production_tracker: ProductionTracker,
                  skills_dir: Path):
         self.anthropic_client: anthropic.Anthropic = anthropic_client
         self.factorio_client: factorio_rcon.RCONClient = factorio_client
-        self.reward_calc: RewardCalculator = reward_calc
+        self.production_tracker: ProductionTracker  = production_tracker
         self.skills_dir: Path = skills_dir
 
     def _windowed_history(self, history: list, window: int | None) -> list:
@@ -99,13 +99,9 @@ class ExecutorAgent:
     def run(self, task: str, max_iterations: int, history_window: int) -> ExecutorState:
         # Agent initialization
         state = ExecutorState(task=task)
-        self.reward_calc.reset()
         state.history.append({
             "role": "user",
-            "content": f"TASK: {task}" + build_observation(
-                client=self.factorio_client, reward_calc=self.reward_calc,
-                result=None, skills_dir=cfg.SKILLS_DIR, start=True,
-            ),
+            "content": build_observation(client=self.factorio_client, result=None, skills_dir=cfg.SKILLS_DIR, production_tracker=self.production_tracker, current_task=task)
         })
 
         # Agent loop
@@ -143,10 +139,7 @@ class ExecutorAgent:
                         + "\n\nFix the code so items come from legitimate sources "
                             "(mining, crafting, or inventories you own) and resubmit.",
             }
-            observation = build_observation(
-                client=self.factorio_client, reward_calc=self.reward_calc,
-                result=fake_result, skills_dir=self.skills_dir, start=False,
-            )
+            observation = build_observation(client=self.factorio_client, result=fake_result, skills_dir=cfg.SKILLS_DIR, production_tracker=self.production_tracker, current_task=state.task)
             state.last_observation = observation
             state.history.append({"role": "assistant", "content": text_block.text})
             state.history.append({"role": "user", "content": observation})
@@ -170,10 +163,7 @@ class ExecutorAgent:
             result["output"] = (result.get("output") or "") + "\n[validator warnings]\n" + format_issues(warns)
 
         # OBSERVE
-        observation = build_observation(
-            client=self.factorio_client, reward_calc=self.reward_calc,
-            result=result, skills_dir=self.skills_dir, start=False,
-        )
+        observation = build_observation(client=self.factorio_client, result=result, skills_dir=cfg.SKILLS_DIR, production_tracker=self.production_tracker, current_task=state.task)
         state.last_observation = observation
 
         state.history.append({"role": "assistant", "content": text_block.text})
@@ -186,102 +176,78 @@ class ExecutorAgent:
 
 
 class PlannerAgent:
-    def __init__(self, 
-                 anthropic_client: anthropic.Anthropic,
-                 factorio_client: factorio_rcon.RCONClient,
-                 skills_dir: Path):
+    def __init__(self, anthropic_client, factorio_client, production_tracker, skills_dir):
         self.anthropic_client: anthropic.Anthropic = anthropic_client
         self.factorio_client: factorio_rcon.RCONClient = factorio_client
+        self.production_tracker: ProductionTracker = production_tracker
         self.skills_dir: Path = skills_dir
+
+    def _build_planner_context(self, goal: str) -> str:
+        entities: list[dict] = get_entity_status(self.factorio_client)
+        self.production_tracker.update(entities)
+        factory_state: str = format_entity_status(entities)
+        metrics: str = self.production_tracker.format_throughput(entities)
+        skill_names: list[str] = get_skill_names(self.skills_dir)
+        skills_str = "\n".join(f"- {s}" for s in skill_names) or "none"
+
+        return f"""GOAL: {goal}
+
+{factory_state}
+
+{metrics}
+
+=== AVAILABLE SKILLS ===
+{skills_str}"""
 
     @observe(name="planner_agent_create_plan")
     def create_plan(self, task: str) -> PlannerState:
         state = PlannerState(goal=task)
-        world_state: str = get_world_state(client=self.factorio_client, radius=64, skills_dir=self.skills_dir)
-        content = f"GOAL: {task}\n\n{world_state}"
-
-        response: Message = call_anthropic(
-            client=self.anthropic_client, prompt=planner_prompt.PLANNER_PROMPT,
+        content = self._build_planner_context(task)
+        response = call_anthropic(
+            client=self.anthropic_client,
+            prompt=planner_prompt.PLANNER_PROMPT,
             history=[{"role": "user", "content": content}],
         )
         text_block = next((b for b in response.content if isinstance(b, TextBlock)), None)
         if not text_block:
             return state
-
-        parsed: dict[str, Any] = parse_planner_agent_output(text_block.text)
-        state.reasoning = parsed['reasoning']
-        state.plan = parsed['plan']
-
+        parsed = parse_planner_agent_output(text_block.text)
+        state.reasoning = parsed["reasoning"]
+        state.plan = parsed["plan"]
         return state
 
     @observe(name="planner_agent_replan")
-    def replan(
-        self,
-        goal: str,
-        completed: list[str],
-        failed_task: str,
-        reason: str,
-    ) -> PlannerState:
+    def replan(self, goal, completed, failed_task, reason) -> PlannerState:
         state = PlannerState(goal=goal)
-        
-        world_state: str = get_world_state(client=self.factorio_client, radius=64, skills_dir=self.skills_dir)
-        
-        completed_str = "\n".join(f"Done {t}" for t in completed) or "None yet"
-        failed_str = f"FAIL {failed_task} - {reason}"
+        context = self._build_planner_context(goal)
+        completed_str = "\n".join(f"- {t['description']}" for t in completed) or "None yet"
+        failed_str = f"- {failed_task['description']} — reason: {reason}"
 
         content = f"""ORIGINAL GOAL: {goal}
 
-        COMPLETED SUBTASKS:
-        {completed_str}
+COMPLETED SUBTASKS:
+{completed_str}
 
-        FAILED SUBTASK:
-        {failed_str}
+FAILED SUBTASK:
+{failed_str}
 
-        CURRENT WORLD STATE:
-        {world_state}
+CURRENT STATE:
+{context}
 
-        Create a new plan to complete the remaining work."""
+Create a new plan to complete the remaining work."""
 
-        response: Message = call_anthropic(
-            client=self.anthropic_client, prompt=planner_prompt.PLANNER_PROMPT,
+        response = call_anthropic(
+            client=self.anthropic_client,
+            prompt=planner_prompt.PLANNER_PROMPT,
             history=[{"role": "user", "content": content}],
         )
         text_block = next((b for b in response.content if isinstance(b, TextBlock)), None)
         if not text_block:
             return state
-
-        parsed: dict[str, Any] = parse_planner_agent_output(text_block.text)
-        state.reasoning = parsed['reasoning']
-        state.plan = parsed['plan']
-        
+        parsed = parse_planner_agent_output(text_block.text)
+        state.reasoning = parsed["reasoning"]
+        state.plan = parsed["plan"]
         return state
-
-
-# class VerifierAgent:
-#     def __init__(self, anthropic_client, factorio_client, skills_dir):
-#         self.anthropic_client = anthropic_client
-#         self.factorio_client = factorio_client
-#         self.skills_dir = skills_dir
-
-#     def verify(self, subtask: str) -> VerifierState:
-#         state = VerifierState(subtask=subtask)
-#         world_state = get_world_state(client=self.factorio_client, radius=64, skills_dir=self.skills_dir)
-        
-#         content = f"""SUBTASK: {subtask}
-        
-# CURRENT WORLD STATE:
-# {world_state}
-
-# Was this subtask actually completed? Check the world state carefully.
-# """
-#         response = call_anthropic(
-#             client=self.anthropic_client,
-#             prompt=VERIFIER_PROMPT,
-#             history=[{"role": "user", "content": content}]
-#         )
-#         # parse verified and reason
-#         ...
-#         return state
 
 
 class Orchestrator:
@@ -310,8 +276,14 @@ class Orchestrator:
         # 2. loop through subtasks
         while state.current_subtask_index < len(state.plan):
             subtask = state.plan[state.current_subtask_index]
+
+            # build full task string for executor
+            description = subtask["description"]
+            criteria = subtask.get("success_criteria", "")
+            full_task = f"{description}\n\nSuccess criteria: {criteria}" if criteria else description
+
             # 3. run executor on subtask
-            executor_state = self.executor.run(subtask, self.max_iterations_per_subtask, self.history_window)
+            executor_state = self.executor.run(full_task, self.max_iterations_per_subtask, self.history_window)
 
             # 4. handle success
             if executor_state.status == AgentStatus.DONE:
@@ -320,54 +292,94 @@ class Orchestrator:
 
             # 5. handle failure - replan
             elif executor_state.status in (AgentStatus.LIMIT, AgentStatus.FAILED):
-                reason = f"hit iteration limit after {executor_state.iteration} steps" \
-                        if executor_state.status == AgentStatus.LIMIT \
-                        else "executor failed"
+                reason = (
+                    f"hit iteration limit after {executor_state.iteration} steps"
+                    if executor_state.status == AgentStatus.LIMIT
+                    else "executor failed"
+                )
                 state.failed_subtasks.append((subtask, reason))
                 if state.replan_count >= self.max_replans:
                     state.status = AgentStatus.FAILED
                     break
 
-                # replan
                 new_plan_state = self.planner.replan(
-                        goal=state.goal,
-                        completed=state.completed_subtasks,
-                        failed_task=subtask,
-                        reason=reason
-                    )
+                    goal=state.goal,
+                    completed=state.completed_subtasks,
+                    failed_task=subtask,
+                    reason=reason,
+                )
                 state.plan = new_plan_state.plan
                 state.replan_count += 1
-                state.current_subtask_index = 0 # don't increment current_subtask_index - replan replaces remaining plan
+                state.current_subtask_index = 0
 
-        # 6. mark complete if all subtasks done
+        # 6. mark complete
         if state.status != AgentStatus.FAILED and state.current_subtask_index >= len(state.plan):
             state.status = AgentStatus.DONE
 
         return state
 
 
+
 if __name__ == "__main__":
-    from agent.dependencies import get_anthropic_client
     from game_integration.dependencies import get_factorio_client
+    from dependencies import get_anthropic_client
+    from metrics.production_tracker import ProductionTracker
+    import agent.cfg as cfg
 
-    anthropic_client = get_anthropic_client()
     factorio_client = get_factorio_client()
-    reward_calc = RewardCalculator(factorio_client)
-    
-    executor = ExecutorAgent(anthropic_client, factorio_client, reward_calc, cfg.SKILLS_DIR)
-    planner = PlannerAgent(anthropic_client, factorio_client, cfg.SKILLS_DIR)
-    orchestrator = Orchestrator(
-        planner=planner,
-        executor=executor,
-        max_replans=3,
-        max_iterations_per_subtask=10,
-        history_window=8,
+    anthropic_client = get_anthropic_client()
+    production_tracker = ProductionTracker()
+
+    planner = PlannerAgent(
+        anthropic_client=anthropic_client,
+        factorio_client=factorio_client,
+        production_tracker=production_tracker,
+        skills_dir=cfg.SKILLS_DIR,
     )
+    task = "Set up an automated iron production line: mine iron ore with a burner miner, smelt it into iron plates with a furnace, and ensure coal fuels the miner automatically"
+    plan_state = planner.create_plan(task)
 
-    task = "Set up an automated iron production line: mine iron ore with a burner miner, smelt it into iron plates with a furnace, and ensure coal fuels the miner automatically, store iron plates to chest"
-    # task = "Build a fully automated iron plate production line"
-    result = orchestrator.run(task)
+    print("REASONING:", plan_state.reasoning)
+    print()
+    # for i, s in enumerate(plan_state.plan, 1):
+    #     print(f"{i}. {s['description']}")
+    #     print(f"   criteria: {s['success_criteria']}")
+    #     print()
+    for item in plan_state.plan:
+        print(item)
 
-    print(f"Status: {result.status}")
-    print(f"Completed: {result.completed_subtasks}")
-    print(f"Failed: {result.failed_subtasks}")
+
+# if __name__ == "__main__":
+#     from game_integration.dependencies import get_factorio_client
+#     from dependencies import get_anthropic_client
+#     from metrics.production_tracker import ProductionTracker
+#     import agent.cfg as cfg
+
+#     factorio_client = get_factorio_client()
+#     anthropic_client = get_anthropic_client()
+#     production_tracker = ProductionTracker()
+
+#     planner = PlannerAgent(
+#         anthropic_client=anthropic_client,
+#         factorio_client=factorio_client,
+#         production_tracker=production_tracker,
+#         skills_dir=cfg.SKILLS_DIR,
+#     )
+#     executor = ExecutorAgent(
+#         anthropic_client=anthropic_client,
+#         factorio_client=factorio_client,
+#         production_tracker=production_tracker,
+#         skills_dir=cfg.SKILLS_DIR,
+#     )
+#     orchestrator = Orchestrator(
+#         planner=planner,
+#         executor=executor,
+#         max_replans=2,
+#         max_iterations_per_subtask=20,
+#         history_window=3,
+#     )
+
+#     task = "Set up an automated iron production line: mine iron ore with a burner miner, smelt it into iron plates with a furnace, and ensure coal fuels the miner automatically"
+#     result = orchestrator.run(task)
+#     print("STATUS:", result.status)
+#     print("COMPLETED:", [s["description"] for s in result.completed_subtasks])

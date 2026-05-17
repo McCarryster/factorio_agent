@@ -305,4 +305,4 @@ if __name__ == "__main__":
     # end
     # """)
     # print(result)
-    print(get_local_map(client, radius=15))
+    print(get_player_position(client))

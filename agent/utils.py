@@ -50,19 +50,26 @@ def parse_executor_agent_output(text: str) -> dict[str, Any]:
     }
 
 def parse_planner_agent_output(text: str) -> dict:
-    """
-    TODO: description
-    """
     reasoning = _extract("reasoning", text) or ""
-    plan_text = _extract("plan", text)
-    
-    # Parse the plan into a list by splitting on numbered lines
-    if plan_text:
-        # Splits by "1. ", "2. ", etc., while removing empty strings
-        plan = [line.strip() for line in re.split(r'\d+\.\s+', plan_text) if line.strip()]
-    else:
-        plan = []
-        
+    plan_text = _extract("plan", text) or ""
+
+    # parse each <subtask> block
+    subtask_blocks = re.findall(r"<subtask>(.*?)</subtask>", plan_text, re.DOTALL)
+    plan = []
+    for block in subtask_blocks:
+        description = _extract("description", block) or ""
+        success_criteria = _extract("success_criteria", block) or ""
+        if description:
+            plan.append({
+                "description": description,
+                "success_criteria": success_criteria,
+            })
+
+    # fallback: if no <subtask> blocks found, try old numbered format
+    if not plan:
+        lines = [l.strip() for l in re.split(r'\d+\.\s+', plan_text) if l.strip()]
+        plan = [{"description": l, "success_criteria": ""} for l in lines]
+
     return {"reasoning": reasoning, "plan": plan}
 
 

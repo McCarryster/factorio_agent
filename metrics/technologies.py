@@ -4,7 +4,7 @@ metrics/technologies.py — Technology research state queries via RCON.
 
 from collections import deque
 import factorio_rcon
-
+import json
 from game_integration.factorio_bridge import execute_lua
 
 _LUA_RESEARCHED = """
@@ -30,20 +30,41 @@ rcon.print(table.concat(out, ','))
 """
 
 
+# def get_technologies_researched(client: factorio_rcon.RCONClient) -> list[str]:
+#     """
+#     Return names of all researched technologies for the player force.
+
+#     Args:
+#         client: RCON client. Uses module-level connection if omitted.
+
+#     Returns:
+#         List of researched technology name strings.
+#     """
+#     result = execute_lua(client, _LUA_RESEARCHED.strip())
+#     if result["status"] == "ERROR" or not result["output"]:
+#         return []
+#     return [t for t in result["output"].split(",") if t]
+
+
 def get_technologies_researched(client: factorio_rcon.RCONClient) -> list[str]:
-    """
-    Return names of all researched technologies for the player force.
+    techs_result = execute_lua(client, """
+    local techs = {}
+    for name, tech in pairs(game.players[1].force.technologies) do
+        if tech.researched then
+            techs[#techs+1] = name
+        end
+    end
+    rcon.print(helpers.table_to_json(techs))
+    """)
+    researched = []
+    if techs_result["status"] == "OK" and techs_result["output"]:
+        try:
+            researched = json.loads(techs_result["output"])
+        except:
+            pass
+    # techs = ", ".join(researched) if researched else "none"
 
-    Args:
-        client: RCON client. Uses module-level connection if omitted.
-
-    Returns:
-        List of researched technology name strings.
-    """
-    result = execute_lua(client, _LUA_RESEARCHED.strip())
-    if result["status"] == "ERROR" or not result["output"]:
-        return []
-    return [t for t in result["output"].split(",") if t]
+    return researched
 
 
 def get_tech_tree_depth(client: factorio_rcon.RCONClient) -> int:

@@ -62,6 +62,15 @@ _RULES = [
         "insert_raw_resource",
         "Inserting raw resources into anything is suspicious — these come from mining/chopping.",
     ),
+    (
+        "ERROR",
+        r"\bplayer\s*\.\s*mine_entity\s*\(",
+        "manual_resource_mining",
+        "player.mine_entity() is FORBIDDEN. The goal is to build automation. "
+        "To get coal/ore/stone, you MUST place a burner-mining-drill on the resource patch and wait. "
+        "The drill will mine the resource over time and drop items at its output tile. "
+        "You can collect from the output tile using inserters or another drill.",
+    ),
 ]
 
 
@@ -74,6 +83,9 @@ _INSERT_PAT = re.compile(
     r"\.insert\s*\{[^}]*\bname\s*=\s*[\"']([\w-]+)[\"']"
 )
 
+_CREATE_ENTITY_PAT = re.compile(
+    r"create_entity\s*\{[^}]*\bname\s*=\s*[\"']([\w-]+)[\"']"
+)
 
 def validate_lua(code: str) -> list[Issue]:
     issues: list[Issue] = []
@@ -81,19 +93,30 @@ def validate_lua(code: str) -> list[Issue]:
     removed_names = set(_REMOVE_PAT.findall(code))
     balanced = inserted_names & removed_names
 
+    # check create_entity calls are balanced with inv.remove
+    created_names = set(_CREATE_ENTITY_PAT.findall(code))
+    unbalanced_entities = created_names - removed_names
+    if unbalanced_entities:
+        issues.append(Issue(
+            severity="ERROR",
+            line=0,
+            rule="create_entity_no_remove",
+            message=f"create_entity used for {unbalanced_entities} without a matching inv.remove{{}} — "
+                    "you must remove the item from player inventory after placing it. "
+                    "If you don't have the item, you cannot place it.",
+        ))
+
     for lineno, line in enumerate(code.splitlines(), start=1):
         # ignore comments
         stripped = re.sub(r"--.*$", "", line)
         for severity, pattern, rule, message in _RULES:
             if re.search(pattern, stripped):
-                # Soften certain ERRORs if the inserted item is also removed elsewhere
                 if rule in ("player_insert", "main_inv_insert"):
                     m = re.search(
                         r"\.insert\s*\{[^}]*\bname\s*=\s*[\"']([\w-]+)[\"']",
                         stripped,
                     )
                     if m and m.group(1) in balanced:
-                        # This insert has a paired remove — let it through but warn.
                         issues.append(Issue(
                             severity="WARN",
                             line=lineno,
