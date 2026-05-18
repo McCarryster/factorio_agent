@@ -15,6 +15,7 @@ Pipeline:
         → summarize()            text for the LLM planner
 """
 
+from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Optional
 from enum import Enum
@@ -228,8 +229,18 @@ def _drill_output(e: SemanticEntity) -> tuple[float, float]:
     return e.x + dx, e.y + dy
 
 def _inserter_tiles(e: SemanticEntity) -> tuple[tuple, tuple]:
-    dx, dy = INSERTER_OFFSETS.get(e.raw["direction"], (0, 0))
-    return (e.x - dx, e.y - dy), (e.x + dx, e.y + dy)
+    """Return (pickup_tile, drop_tile) for an inserter.
+    Uses actual API positions if available (more accurate than offset math).
+    """
+    px = e.raw.get("pickup_x", -1)
+    py = e.raw.get("pickup_y", -1)
+    dx = e.raw.get("drop_x", -1)
+    dy = e.raw.get("drop_y", -1)
+    if px != -1 and dx != -1:
+        return (px, py), (dx, dy)
+    # Fallback to offset math
+    odx, ody = INSERTER_OFFSETS.get(e.raw["direction"], (0, 0))
+    return (e.x - odx, e.y - ody), (e.x + odx, e.y + ody)
 
 def _pole_type(e: SemanticEntity) -> Optional[str]:
     for k in POLE_SUPPLY_RADIUS:
@@ -372,67 +383,103 @@ def detect_subsystems(entities: list[SemanticEntity]) -> dict[SubsystemName, Sub
 
 def trace_power(entities: list[SemanticEntity]) -> tuple[set[int], Optional[str]]:
     """
-    Step 4: Flood-fill the power grid from generators.
+    Step 4: Determine which electric consumers are powered.
+
+    Uses electric_network_id from the game (Factorio 2.x).
+    Entities sharing a network_id with a generator are powered.
 
     Returns:
-        powered_ids   — set of id() for entities within supply radius
-        gap_desc      — human description of the coverage gap, or None
+        powered_ids — set of id() for powered consumers
+        gap_desc    — human description of network gap, or None
     """
     poles      = [e for e in entities if _pole_type(e)]
-    generators = [e for e in entities
-                  if e.role == EntityRole.POWER_SOURCE]
+    generators = [e for e in entities if e.role == EntityRole.POWER_SOURCE]
     consumers  = [e for e in entities
                   if any(c in e.name for c in ELECTRIC_CONSUMERS)]
 
-    if not generators or not poles:
-        return set(), "No power generation or no poles placed."
+    if not generators:
+        return set(), "No power generation found."
+    if not poles:
+        return set(), "No electric poles placed."
 
-    # Seed connected poles: any pole within wire reach of a generator
-    connected: set[int] = set()
+    # Find which network_ids belong to generators
+    # A generator's network_id matches poles that are wired to it
+    generator_networks: set[int] = set()
     for gen in generators:
-        for pole in poles:
-            pk = _pole_type(pole)
-            if _dist(gen.x, gen.y, pole.x, pole.y) <= POLE_WIRE_REACH.get(pk, 9.0):
-                connected.add(id(pole))
+        nid = gen.raw.get("electric_network_id", -1)
+        if nid and nid != -1:
+            generator_networks.add(nid)
 
-    # Expand: any pole within wire reach of a connected pole
-    changed = True
-    while changed:
-        changed = False
-        for pole in poles:
-            if id(pole) in connected:
-                continue
-            pk = _pole_type(pole)
-            wire = POLE_WIRE_REACH.get(pk, 9.0)
-            for other in poles:
-                if id(other) in connected and _dist(pole.x, pole.y, other.x, other.y) <= wire:
-                    connected.add(id(pole))
-                    changed = True
-                    break
+    # If generator has no network_id, fall back to geometric proximity
+    # (generator is within wire reach of a pole)
+    if not generator_networks:
+        for gen in generators:
+            for pole in poles:
+                pk = _pole_type(pole)
+                if _dist(gen.x, gen.y, pole.x, pole.y) <= POLE_WIRE_REACH.get(pk, 9.0):
+                    nid = pole.raw.get("electric_network_id", -1)
+                    if nid and nid != -1:
+                        generator_networks.add(nid)
 
-    connected_poles = [p for p in poles if id(p) in connected]
+    # Powered poles: those sharing a network_id with a generator
+    powered_pole_ids: set[int] = set()
+    for pole in poles:
+        nid = pole.raw.get("electric_network_id", -1)
+        if nid in generator_networks:
+            powered_pole_ids.add(id(pole))
 
-    # Which consumers are within supply radius of a connected pole?
+    powered_poles = [p for p in poles if id(p) in powered_pole_ids]
+
+    # Powered consumers: within supply radius of a powered pole
     powered: set[int] = set()
-    for pole in connected_poles:
+    for pole in powered_poles:
         pk = _pole_type(pole)
         supply = POLE_SUPPLY_RADIUS.get(pk, 7.5)
         for c in consumers:
             if _dist(pole.x, pole.y, c.x, c.y) <= supply:
                 powered.add(id(c))
 
-    # Describe gap if any consumer is unpowered
+    # Describe the gap
+    # Gap between pole networks: find the closest poles from different networks
     gap_desc = None
-    unpowered = [c for c in consumers if id(c) not in powered]
-    if unpowered and connected_poles:
-        ue = unpowered[0]
-        closest = min(connected_poles, key=lambda p: _dist(p.x, p.y, ue.x, ue.y))
+    unpowered_poles = [p for p in poles if id(p) not in powered_pole_ids]
+    unpowered_consumers = [c for c in consumers if id(c) not in powered]
+
+    if unpowered_poles and powered_poles:
+        # Find the closest pair of poles from different networks
+        best_dist = float("inf")
+        best_powered = None
+        best_unpowered = None
+        for pp in powered_poles:
+            for up in unpowered_poles:
+                d = _dist(pp.x, pp.y, up.x, up.y)
+                if d < best_dist:
+                    best_dist = d
+                    best_powered = pp
+                    best_unpowered = up
+
+        if best_powered and best_unpowered:
+            pk = _pole_type(best_powered)
+            wire_reach = POLE_WIRE_REACH.get(pk, 9.0)
+            shortfall = best_dist - wire_reach
+            midpoint = ((best_powered.x + best_unpowered.x) / 2,
+                        (best_powered.y + best_unpowered.y) / 2)
+            gap_desc = (
+                f"Network gap: powered pole@{best_powered.pos} is {best_dist:.1f} tiles "
+                f"from unpowered pole@{best_unpowered.pos} "
+                f"(wire reach {wire_reach} tiles — {shortfall:.1f} tiles short). "
+                f"Bridge midpoint: ({midpoint[0]:.1f},{midpoint[1]:.1f})"
+            )
+    elif unpowered_consumers and powered_poles:
+        # Gap between poles and consumers (supply radius issue)
+        ue = unpowered_consumers[0]
+        closest = min(powered_poles, key=lambda p: _dist(p.x, p.y, ue.x, ue.y))
         gap = _dist(closest.x, closest.y, ue.x, ue.y)
         pk = _pole_type(closest)
         supply = POLE_SUPPLY_RADIUS.get(pk, 7.5)
         shortfall = gap - supply
         gap_desc = (
-            f"Nearest connected pole is {gap:.1f} tiles from "
+            f"Nearest powered pole is {gap:.1f} tiles from "
             f"{ue.label} "
             f"(supply radius {supply} tiles — {shortfall:.1f} tiles short)"
         )
@@ -468,6 +515,14 @@ class ItemFlow:
 
     def summary(self) -> str:
         steps = []
+        # Show drill output tile so executor knows where to place furnace
+        if self.source and "mining-drill" in self.source.name:
+            direction = self.source.raw.get("direction", 8)
+            offsets = {0: (0,-2), 4: (2,0), 8: (0,2), 12: (-2,0)}
+            dx, dy = offsets.get(direction, (0,2))
+            ox = self.source.x + dx
+            oy = self.source.y + dy
+            steps.append(f"    drill output tile: ({ox},{oy})")
         for e in [self.source, self.feeder, self.processor, self.collector]:
             if e is None:
                 continue
@@ -571,10 +626,33 @@ def diagnose(
             e.is_blocked = True
             e.block_reason = e.status
 
+    # --- No generation at all ---
+    # Only relevant if electric consumers exist that need power.
+    # A fresh factory with only burner machines doesn't need generation yet.
+    generators = [e for e in entities if e.role == EntityRole.POWER_SOURCE]
+    if not generators:
+        consumers = [e for e in entities
+                     if any(c in e.name for c in ELECTRIC_CONSUMERS)]
+        if consumers:
+            causes.append(RootCause(
+                failure_type       = FailureType.NO_GENERATION,
+                description        = "No power generation exists. A steam engine, solar panel, "
+                                     "or other generator must be built and connected.",
+                affected           = consumers,
+                downstream_effects = [
+                    "all electric consumers have no power",
+                    "inserters disabled",
+                    "smelting halted",
+                    "mining halted",
+                ],
+                evidence           = "No steam-engine or solar-panel found in factory",
+            ))
+
     # --- Power network gap ---
+    # Combine: entities not in powered_ids OR entities with explicit NO_POWER status
     no_power = [e for e in entities
                 if any(c in e.name for c in ELECTRIC_CONSUMERS)
-                and id(e) not in powered_ids]
+                and (id(e) not in powered_ids or e.status == "NO_POWER")]
     if no_power:
         effects = []
         # Which subsystems are affected?
@@ -658,9 +736,13 @@ def diagnose(
             ))
 
     # --- Update subsystem statuses ---
+    has_no_generation = any(c.failure_type == FailureType.NO_GENERATION for c in causes)
     for sys_name, sys in systems.items():
         if sys.total_count == 0:
             sys.status = "ABSENT"
+        elif sys_name == SubsystemName.POWER and has_no_generation:
+            # No generator means power system is DOWN regardless of pole count
+            sys.status = "DOWN"
         elif sys.operational_count == sys.total_count:
             sys.status = "OK"
         elif sys.operational_count > 0:
@@ -708,8 +790,13 @@ def _find_free_tile_between(
         candidates = [
             (sx, sy),
             (sx, sy - 1.0), (sx, sy + 1.0),
-            (sx, sy - 2.0), (sx, sy + 2.0),
             (sx - 1.0, sy), (sx + 1.0, sy),
+            (sx, sy - 2.0), (sx, sy + 2.0),
+            (sx - 2.0, sy), (sx + 2.0, sy),
+            (sx - 1.0, sy - 1.0), (sx + 1.0, sy - 1.0),
+            (sx - 1.0, sy + 1.0), (sx + 1.0, sy + 1.0),
+            (sx, sy - 3.0), (sx, sy + 3.0),
+            (sx - 3.0, sy), (sx + 3.0, sy),
         ]
         for cx2, cy2 in candidates:
             if (cx2, cy2) not in occupied:
@@ -763,11 +850,14 @@ def generate_repairs(
             no_power = cause.affected
 
             suggested = None
-            if no_power:
-                # Find the nearest pole to the first unpowered consumer.
-                # We cannot use powered_ids here (it tracks consumers, not poles).
-                # Instead: all poles are candidates; the nearest one to the
-                # unpowered consumer is the "last connected pole".
+            # Try to parse midpoint from gap_desc first (most accurate)
+            if cause.evidence:
+                import re
+                m = re.search(r"Bridge midpoint: \(([-\d.]+),([-\d.]+)\)", cause.evidence)
+                if m:
+                    suggested = (float(m.group(1)), float(m.group(2)))
+            # Fall back to tile finder if no midpoint in evidence
+            if not suggested and no_power:
                 all_poles = [e for e in entities if "electric-pole" in e.name]
                 uc = no_power[0]
                 if all_poles:

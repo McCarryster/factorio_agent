@@ -1,4 +1,6 @@
 """
+verifier.py
+
 After the executor runs, the verifier independently re-observes the world
 and checks whether the planner's success condition was met.
 
@@ -18,6 +20,7 @@ Usage:
         memory.record_failed(..., reason=result.reason)
 """
 
+from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Optional
 import re
@@ -36,6 +39,7 @@ from agent.observability.world_model import (
 # ---------------------------------------------------------------------------
 # Verification result
 # ---------------------------------------------------------------------------
+
 @dataclass
 class VerificationResult:
     verified: bool
@@ -50,6 +54,7 @@ class VerificationResult:
 # ---------------------------------------------------------------------------
 # Condition checkers
 # ---------------------------------------------------------------------------
+
 def _parse_entity_condition(
     condition: str,
     entities: list[dict],
@@ -126,6 +131,18 @@ def _parse_subsystem_condition(
     pattern = rf"\[(\w+)\s*\]\s+{subsystem}\s+\((\d+)/(\d+) operational\)"
     sm = re.search(pattern, world_summary, re.IGNORECASE)
     if not sm:
+        # Subsystem absent (no entities) — treat as 0 operational
+        operational = 0
+        status_str = "ABSENT"
+        if field == "operational":
+            try:
+                rhs = int(value)
+            except ValueError:
+                return None
+            if operator == ">":  return operational > rhs
+            elif operator == ">=": return operational >= rhs
+            elif operator == "==": return operational == rhs
+            elif operator == "!=": return operational != rhs
         return None
 
     status_str   = sm.group(1).strip()
@@ -171,6 +188,7 @@ def _check_production_running(world_summary: str) -> bool:
 # ---------------------------------------------------------------------------
 # Verifier
 # ---------------------------------------------------------------------------
+
 class Verifier:
     def __init__(
         self,
@@ -231,6 +249,16 @@ class Verifier:
             )
 
         if condition == "production_running":
+            # Rate measurement needs multiple observations to be meaningful.
+            # If tracker hasn't accumulated enough data, report as not yet measurable.
+            obs = getattr(self.production_tracker, "update_count", None)
+            if obs is not None and obs < 3:
+                return VerificationResult(
+                    verified=False,
+                    reason=f"Production rate not yet measurable ({obs}/3 observations). "
+                           f"Re-check after more loop iterations.",
+                    world_summary=world_summary,
+                )
             ok = _check_production_running(world_summary)
             reason = "Iron plate production is running." if ok \
                      else "Iron plate production is still 0/sec."
@@ -262,17 +290,30 @@ class Verifier:
         )
 
     def check_goal_achieved(self) -> bool:
-        """Check whether the top-level goal is complete."""
+        """
+        Check whether the top-level goal is complete.
+
+        We consider the goal achieved when:
+        - No critical failures exist
+        - All key subsystems are operational
+
+        We do NOT require production_running > 0 here because the
+        ProductionTracker needs multiple observations to report a non-zero
+        rate. The loop will detect sustained production separately.
+        """
         _, _, _, world_summary = self._observe()
-        return (
-            _check_production_running(world_summary)
-            and _check_no_critical_failures(world_summary)
-        )
+        if not _check_no_critical_failures(world_summary):
+            return False
+        # Check smelting is actually running
+        smelting_ok = _parse_subsystem_condition("smelting.operational > 0", world_summary)
+        mining_ok   = _parse_subsystem_condition("mining.operational > 0", world_summary)
+        return bool(smelting_ok and mining_ok)
 
 
 # ---------------------------------------------------------------------------
 # Test
 # ---------------------------------------------------------------------------
+
 if __name__ == "__main__":
     from game_integration.dependencies import get_factorio_client
     from metrics.production_tracker import ProductionTracker

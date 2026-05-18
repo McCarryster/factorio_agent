@@ -16,6 +16,7 @@ from typing import Any
 # from agent.observability.build_planner_context import build_planner_context
 # from agent.observability.build_planner_context import build_planner_context
 from agent.observability.world_model import build_semantic_world_model
+from metrics.entity_status import get_ore_patches, format_ore_patches
 
 
 def build_observation(client,
@@ -130,6 +131,30 @@ def build_observation(client,
 
 #     return planner_context
 
+# def get_planner_context(
+#     client: factorio_rcon.RCONClient,
+#     production_tracker: ProductionTracker,
+#     skills_dir: Path,
+#     current_task: str = "",
+#     current_requirement: str = "",
+# ) -> str:
+
+#     entities: list[dict] = get_entity_status(client)
+#     production_tracker.update(entities)
+#     throughput: dict[str, float] = production_tracker.get_throughput()
+#     inventory: dict[str, int] = get_player_inventory(client)
+#     techs: list[str] = get_technologies_researched(client)
+
+#     return build_semantic_world_model(
+#         raw_entities=entities,
+#         throughput=throughput,
+#         inventory=inventory,
+#         technologies=techs,
+#         goal=current_task,
+#         current_requirement=current_requirement,
+#     )
+
+
 def get_planner_context(
     client: factorio_rcon.RCONClient,
     production_tracker: ProductionTracker,
@@ -137,14 +162,17 @@ def get_planner_context(
     current_task: str = "",
     current_requirement: str = "",
 ) -> str:
-
-    entities: list[dict] = get_entity_status(client)
+    entities = get_entity_status(client)
     production_tracker.update(entities)
-    throughput: dict[str, float] = production_tracker.get_throughput()
-    inventory: dict[str, int] = get_player_inventory(client)
-    techs: list[str] = get_technologies_researched(client)
+    throughput = production_tracker.get_throughput()
+    inventory = get_player_inventory(client)
+    techs = get_technologies_researched(client)
+    
+    # Add ore patch locations for empty-factory case
+    ore_patches = get_ore_patches(client)
+    ore_section = format_ore_patches(ore_patches)
 
-    return build_semantic_world_model(
+    world_model = build_semantic_world_model(
         raw_entities=entities,
         throughput=throughput,
         inventory=inventory,
@@ -152,57 +180,40 @@ def get_planner_context(
         goal=current_task,
         current_requirement=current_requirement,
     )
-
-
-
-# def get_world_state(client: factorio_rcon.RCONClient, radius: int, skills_dir: Path) -> str:
-#     """
-#     TODO: description
-#     """
-#     inventory: dict[str, int] = get_player_inventory(client)
-#     resources: list[dict[str, Any]] = get_nearby_cluster_resources(client, radius=radius)
-#     pos: dict[str, float] = get_player_position(client)
-#     entities_placed: dict[str, int] = get_entities_placed(client=client)
-#     tech_tree_depth: int = get_tech_tree_depth(client=client)
-#     technologies_researched: list[str] = get_technologies_researched(client=client)
-#     library_size: int = get_skill_library_size(skills_dir=skills_dir)
-
-#     core_state = f"""
-# CURRENT WORLD STATE:
-#     INVENTORY: {", ".join([f"{k}: {v}" for k, v in inventory.items()])}.
-#     CHARACTER POSITION: {pos["x"], pos["y"]}.
-#     NEARBY CLUSTERS OF RESOURCES: {", ".join([f"{r['name']} at ({r['x']}, {r['y']}) amount={r['amount']}, tiles={r['count']}" for r in resources])}.
-#     ENTITIES PLACED: {entities_placed}.
-#     TECHNOLOGIES RESEARCHED ({tech_tree_depth} TOTAL): {technologies_researched}
-
-# AVAILABLE SKILLS ({library_size} TOTAL):
-#     {get_skills_for_prompt(skills_dir)}
-# """
     
-#     return core_state
-
+    # Append ore patches to world model
+    return world_model + "\n" + ore_section
 
 if __name__ == "__main__":
     from game_integration.dependencies import get_factorio_client
     import agent.cfg as cfg
-    import time
+    # import time
 
-    factorio_client = get_factorio_client()
-    production_tracker = ProductionTracker()
+    # factorio_client = get_factorio_client()
+    # production_tracker = ProductionTracker()
 
-    # # first observation
-    # obs = build_observation(client=factorio_client, result=None, skills_dir=cfg.SKILLS_DIR, 
-    #                         production_tracker=production_tracker, current_task="task example...")
-    # # print("=== FIRST OBSERVATION ===")
-    # print(obs)
+    # # # first observation
+    # # obs = build_observation(client=factorio_client, result=None, skills_dir=cfg.SKILLS_DIR, 
+    # #                         production_tracker=production_tracker, current_task="task example...")
+    # # # print("=== FIRST OBSERVATION ===")
+    # # print(obs)
 
-    # time.sleep(5)  # wait for furnace to produce something
+    # # time.sleep(5)  # wait for furnace to produce something
 
-    # # second observation — now rate will show
-    # obs = build_observation(client=factorio_client, result=None, skills_dir=cfg.SKILLS_DIR,
-    #                         production_tracker=production_tracker, current_task="task example...")
-    # print("=== SECOND OBSERVATION ===")
-    # print(obs)
+    # # # second observation — now rate will show
+    # # obs = build_observation(client=factorio_client, result=None, skills_dir=cfg.SKILLS_DIR,
+    # #                         production_tracker=production_tracker, current_task="task example...")
+    # # print("=== SECOND OBSERVATION ===")
+    # # print(obs)
 
-    context_planner = get_planner_context(factorio_client, production_tracker, cfg.SKILLS_DIR, current_task="task example...")
-    print(context_planner)
+    # context_planner = get_planner_context(factorio_client, production_tracker, cfg.SKILLS_DIR, current_task="task example...")
+    # print(context_planner)
+    from agent.planner import choose_next_action, EpisodicMemory
+    from agent.observability.build_observation import get_planner_context
+    from metrics.production_tracker import ProductionTracker
+
+    client = get_factorio_client()
+    tracker = ProductionTracker()
+    world = get_planner_context(client, tracker, cfg.SKILLS_DIR, 
+                                current_task="Build fully automated iron plate production.")
+    print(world)

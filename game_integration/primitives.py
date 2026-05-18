@@ -1,4 +1,6 @@
 """
+primitives.py
+
 Defines the six primitive actions the executor LLM can emit.
 Translates a list of primitive calls into a single Lua script
 that executes them all and reports results.
@@ -207,14 +209,58 @@ do
         if player.get_item_count(name) == 0 then
             report("ERR:{idx}:PLACE_ENTITY:no_item:" .. name .. " not in inventory")
         elseif not surface.can_place_entity{{name=name, position=pos, force=force, direction=dir}} then
-            report("ERR:{idx}:PLACE_ENTITY:blocked:cannot place " .. name ..
+            -- Try adjacent tiles before giving up
+            local offsets = {{{{0,-1}},{{0,1}},{{-1,0}},{{1,0}},{{0,-2}},{{0,2}},{{-2,0}},{{2,0}}}}
+            local placed_alt = false
+            for _, off in ipairs(offsets) do
+                local alt = {{pos[1]+off[1], pos[2]+off[2]}}
+                if surface.can_place_entity{{name=name, position=alt, force=force, direction=dir}} then
+                    local e2 = surface.create_entity{{name=name, position=alt, force=force, direction=dir, player=player, raise_built=true}}
+                    if e2 then
+                        player.remove_item{{name=name, count=1}}
+                        if e2.type == "electric-pole" then
+                            local nearby = surface.find_entities_filtered{{type="electric-pole", force=force, position=alt, radius=9.0}}
+                            local my_conn = e2.get_wire_connector(defines.wire_connector_id.pole_copper, true)
+                            for _, neighbour in ipairs(nearby) do
+                                if neighbour ~= e2 then
+                                    local their_conn = neighbour.get_wire_connector(defines.wire_connector_id.pole_copper, true)
+                                    my_conn.connect_to(their_conn, true)
+                                end
+                            end
+                        end
+                        report("OK:{idx}:PLACE_ENTITY:" .. name .. ":(" .. alt[1] .. "," .. alt[2] .. ") [alt position]")
+                        actions_taken = actions_taken + 1
+                        placed_alt = true
+                        break
+                    end
+                end
+            end
+            if not placed_alt then
+                report("ERR:{idx}:PLACE_ENTITY:blocked:cannot place " .. name ..
                    " at (" .. pos[1] .. "," .. pos[2] .. ")")
+            end
         else
             local e = surface.create_entity{{
                 name=name, position=pos, force=force, direction=dir, player=player
             }}
             if e then
                 player.remove_item{{name=name, count=1}}
+                -- For electric poles: wire to all reachable poles (Factorio 2.x)
+                if e.type == "electric-pole" then
+                    local nearby = surface.find_entities_filtered{{
+                        type="electric-pole", force=force,
+                        position=pos, radius=9.0
+                    }}
+                    local my_conn = e.get_wire_connector(
+                        defines.wire_connector_id.pole_copper, true)
+                    for _, neighbour in ipairs(nearby) do
+                        if neighbour ~= e then
+                            local their_conn = neighbour.get_wire_connector(
+                                defines.wire_connector_id.pole_copper, true)
+                            my_conn.connect_to(their_conn, true)
+                        end
+                    end
+                end
                 report("OK:{idx}:PLACE_ENTITY:" .. name ..
                        ":(" .. pos[1] .. "," .. pos[2] .. ")")
                 actions_taken = actions_taken + 1

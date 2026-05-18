@@ -1,6 +1,4 @@
 """
-planner.py
-
 Reads the semantic world model summary + episodic memory,
 calls the LLM, and returns a single structured next action.
 
@@ -15,7 +13,6 @@ Output schema:
     }
 """
 
-from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
@@ -34,7 +31,7 @@ ACTION_TYPES = {
     "REMOVE_ENTITY":        "Remove a misplaced or blocking entity.",
     "ROTATE_ENTITY":        "Rotate an entity to fix wrong orientation.",
     "CONNECT_POWER":        "Connect an isolated pole into the main network.",
-    "MOVE_TO":              "Move the player to a location.",
+    # MOVE_TO removed — Lua executes server-side, player position irrelevant.
     "CRAFT_ITEM":           "Craft items from available materials.",
     "TRANSFER_ITEM":        "Move items from inventory to an entity or chest.",
     "INSPECT_ENTITY":       "Observe the state of a specific entity.",
@@ -139,7 +136,18 @@ You must respond with a valid JSON object and nothing else. No explanation outsi
   "parameters": {{
     "<key>": "<value>"
   }},
-  "success_condition": "<how to verify this step worked, in plain English>"
+  "success_condition": "<ONE condition in EXACT format — see formats below>"
+
+SUCCESS CONDITION FORMATS (use exactly one):
+  Entity status:    inserter@(X,Y).status != NO_POWER
+  Entity status:    stone-furnace@(X,Y).status == WORKING
+  Subsystem count:  smelting.operational > 0
+  Subsystem count:  mining.operational >= 4
+  Special:          no_critical_failures
+  Special:          production_running
+
+Use coordinates from the world model exactly as written (e.g. inserter@(41.5,27.5)).
+Do NOT write free-text conditions. The verifier can only parse the formats above.
 }}
 
 == RULES ==
@@ -154,12 +162,71 @@ You must respond with a valid JSON object and nothing else. No explanation outsi
 7. target must be semantic (area name, entity label, subsystem name) — never raw coordinates.
    The executor skill layer resolves exact positions.
 
+== PARAMETERS ==
+Always include relevant coordinates in parameters so the executor has exact positions.
+For EXTEND_POWER_NETWORK, include:
+  "suggested_position": "X, Y"   ← use the 'Suggested position' from REPAIR OPPORTUNITIES
+  "gap_tiles": N                  ← shortfall in tiles from Evidence line
+  success_condition must be: smelting.operational > 0
+  Never use a specific inserter status for EXTEND_POWER_NETWORK — the pole may not reach every consumer.
+For INSERT_FUEL, include:
+  "fuel_item": "coal"
+  "target_entities": "entity@(X,Y), ..."
+For PLACE_ENTITY, include:
+  "position": "X, Y"
+  "entity_name": "..."
+  "direction": "NORTH"
+
 == PRIORITY ORDER ==
 When multiple failures exist, fix in this order:
   1. Power (EXTEND_POWER_NETWORK, CONNECT_POWER)
   2. Fuel  (INSERT_FUEL)
   3. Flow  (PLACE_ENTITY, ROTATE_ENTITY, REMOVE_ENTITY)
-  4. Verify production is running (WAIT then check)
+  4. If all subsystems show [OK] and no critical failures → emit WAIT, do nothing else
+
+== BUILD ORDER (nothing built yet) ==
+When the factory is empty AND inventory has no coal, follow this sequence:
+
+PHASE 1 — Get coal first (required for sustained production):
+  1. PLACE_ENTITY burner-mining-drill on COAL patch (not iron ore)
+     facing SOUTH — outputs to (drill_x, drill_y + 2)
+  2. INSERT_ITEM wood into drill fuel slot
+  3. WAIT a few seconds for coal to accumulate in output area
+  4. TAKE_ITEM coal from drill output area (or wait for drill to fill up)
+
+PHASE 2 — Build iron production:
+  5. PLACE_ENTITY burner-mining-drill on IRON ORE patch, facing SOUTH
+  6. INSERT_ITEM coal into drill fuel slot
+  7. PLACE_ENTITY stone-furnace — center at EXACTLY (drill_x, drill_y + 2)
+     (that is the drill output tile — ore drops directly into furnace)
+  8. INSERT_ITEM coal into furnace fuel slot
+  9. Verify smelting.operational > 0
+
+CRITICAL POSITIONING RULES:
+- Drill facing SOUTH: output tile is (drill_x, drill_y + 2)
+- Drill facing NORTH: output tile is (drill_x, drill_y - 2)
+- Stone furnace center must be at EXACTLY the output tile
+- The item flows section shows "drill output tile: (X,Y)" — use those exact coordinates
+- Do NOT use alt positions for furnace placement — exact position only
+- Do NOT place transport-belt or inserter — not in inventory
+- Do NOT try to craft coal — it cannot be crafted
+
+INVENTORY CHECK:
+If coal > 0 in inventory: skip Phase 1, go directly to Phase 2.
+If wood > 0 but coal = 0: must do Phase 1 first.
+
+== CRITICAL RULE: WHEN TO STOP ACTING ==
+If the world model shows:
+  - No critical failures
+  - All subsystems [OK]
+  - Item flows show no broken steps
+
+Then the factory is working. Do NOT place new entities. Do NOT try to fix things.
+Emit WAIT with success_condition: no_critical_failures
+
+Iron plate production showing 0.00/sec is a MEASUREMENT DELAY, not a failure.
+The production tracker needs time to accumulate data.
+If subsystems are all OK, trust that and WAIT.
 """
 
 def _build_action_list() -> str:
@@ -325,7 +392,7 @@ Priority 1 [HIGH IMPACT / LOW COST]: place_electric_pole
   steam-power
 """
 
-    from agent.dependencies import get_anthropic_client
+    from game_integration.dependencies import get_anthropic_client
     client = get_anthropic_client()
 
     memory = EpisodicMemory(goal="Build fully automated iron plate production.")
