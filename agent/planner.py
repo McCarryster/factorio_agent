@@ -1,4 +1,6 @@
 """
+planner.py
+
 Reads the semantic world model summary + episodic memory,
 calls the LLM, and returns a single structured next action.
 
@@ -13,6 +15,7 @@ Output schema:
     }
 """
 
+from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
@@ -25,13 +28,20 @@ import anthropic
 # ---------------------------------------------------------------------------
 
 ACTION_TYPES = {
+    # --- Factory building blocks (use these when infrastructure is missing) ---
+    "BUILD_COAL_MINING":    "Place coal drills + collector belt on coal patch.",
+    "BUILD_IRON_MINING":    "Place iron drills + main belt on iron ore patch.",
+    "BUILD_SMELTING":       "Place furnaces + inserters connected to iron mining belt.",
+    "BUILD_STEAM_NETWORK":  "Place offshore pump + boiler + steam engine near water.",
+    "BUILD_POWER_LINE":     "Place electric poles from steam engine to factory.",
+    "CONNECT_COAL_BELT":    "Route belt from coal output to join iron ore belt right lane.",
+    # --- Repair actions (use these when infrastructure exists but is broken) ---
     "EXTEND_POWER_NETWORK": "Place electric poles to close a power coverage gap.",
     "INSERT_FUEL":          "Insert coal into burner entities that have run out.",
     "PLACE_ENTITY":         "Place a new entity (drill, furnace, inserter, belt).",
     "REMOVE_ENTITY":        "Remove a misplaced or blocking entity.",
     "ROTATE_ENTITY":        "Rotate an entity to fix wrong orientation.",
     "CONNECT_POWER":        "Connect an isolated pole into the main network.",
-    # MOVE_TO removed — Lua executes server-side, player position irrelevant.
     "CRAFT_ITEM":           "Craft items from available materials.",
     "TRANSFER_ITEM":        "Move items from inventory to an entity or chest.",
     "INSPECT_ENTITY":       "Observe the state of a specific entity.",
@@ -184,6 +194,44 @@ When multiple failures exist, fix in this order:
   3. Flow  (PLACE_ENTITY, ROTATE_ENTITY, REMOVE_ENTITY)
   4. If all subsystems show [OK] and no critical failures → emit WAIT, do nothing else
 
+== FACTORY BUILDING ACTIONS ==
+
+Use BUILD_* actions when subsystems are ABSENT (never built).
+Use repair actions (EXTEND_POWER_NETWORK etc.) when subsystems exist but are broken.
+
+BUILD_COAL_MINING:
+  When: mining subsystem ABSENT or no coal drills exist
+  parameters field MUST include: {{"near_x": X, "near_y": Y}}
+  Use coordinates from "=== NEARBY ORE PATCHES ===" section for coal
+  Success: mining.operational > 0
+
+BUILD_IRON_MINING:
+  When: mining subsystem ABSENT or no iron drills exist
+  parameters field MUST include: {{"near_x": X, "near_y": Y}}
+  Use coordinates from "=== NEARBY ORE PATCHES ===" section for iron-ore
+  Success: mining.operational > 0
+
+BUILD_SMELTING:
+  When: smelting subsystem ABSENT
+  Requires: iron mining already built (needs drill positions)
+  Parameters: {{}}
+  Success: smelting.operational > 0
+
+BUILD_STEAM_NETWORK:
+  When: power subsystem ABSENT (no steam engine)
+  Parameters: {{}}  (finds water automatically)
+  Success: power.operational > 0
+
+BUILD_POWER_LINE:
+  When: steam engine exists but factory has no power
+  Parameters: {{}}  (routes from engine to factory automatically)
+  Success: no_critical_failures OR power network reaches factory
+
+CONNECT_COAL_BELT:
+  When: main belt is SINGLE (iron-ore only) but coal drills exist
+  Parameters: {{}}
+  Success: main belt becomes DUAL_MIXED
+
 == BUILD ORDER (nothing built yet) ==
 When the factory is empty AND inventory has no coal, follow this sequence:
 
@@ -265,6 +313,25 @@ class PlannerAction:
         return "\n".join(lines)
 
 
+def _extract_parameters(data: dict) -> dict:
+    """Extract parameters from LLM output, handling various formats."""
+    import json as _json
+    params = data.get("parameters", {})
+    if isinstance(params, str):
+        try:
+            params = _json.loads(params)
+        except Exception:
+            params = {}
+    if not isinstance(params, dict):
+        params = {}
+    # Also absorb top-level keys that look like parameters
+    for key in ("near_x", "near_y", "resource", "suggested_position",
+                "gap_tiles", "suggested_x", "suggested_y"):
+        if key in data and key not in params:
+            params[key] = data[key]
+    return params
+
+
 def choose_next_action(
     client: anthropic.Anthropic,
     world_summary: str,
@@ -321,7 +388,7 @@ Respond with JSON only.
         reasoning         = data.get("reasoning", []),
         action            = action,
         target            = data.get("target", ""),
-        parameters        = data.get("parameters", {}),
+        parameters        = _extract_parameters(data),
         success_condition = data.get("success_condition", ""),
     )
 

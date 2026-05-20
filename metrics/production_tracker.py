@@ -1,5 +1,3 @@
-# metrics/production_tracker.py
-
 import time
 from collections import defaultdict
 

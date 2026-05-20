@@ -16,7 +16,6 @@ import sys
 import json
 from pathlib import Path
 from collections import defaultdict
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from game_integration.dependencies import get_factorio_client
 from game_integration.factorio_bridge import execute_lua

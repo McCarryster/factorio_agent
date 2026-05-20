@@ -1,3 +1,5 @@
+from game_integration.factorio_bridge import execute_lua
+
 # Factorio 2.x entity status enum values (verified)
 STATUS_MAP = {
     1:  "WORKING",

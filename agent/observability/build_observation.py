@@ -75,90 +75,9 @@ def build_observation(client,
 
     return "\n\n".join(sections)
 
-
-# def build_planner_context(client: factorio_rcon.RCONClient, 
-#                           production_tracker: ProductionTracker,
-#                           skills_dir: Path, 
-#                           current_task: str = "") -> str:
-
-#     inventory = get_player_inventory(client)
-#     entities = get_entity_status(client)
-#     production_tracker.update(entities)
-
-#     sections = []
-
-#     # task
-#     if current_task:
-#         sections.append(f"=== CURRENT TASK ===\n{current_task}")
-
-#     # factory state + bottlenecks (already combined in format_entity_status)
-#     sections.append(format_entity_status(entities))
-
-#     # production metrics
-#     prod_metrics = production_tracker.format_throughput(entities)
-#     if "  (rate tracking: need 2+ observations)" in prod_metrics:
-#         pass
-#     else:
-#         sections.append(prod_metrics)
-
-#     # inventory
-#     inv_str = ", ".join(f"{k}: {v}" for k, v in inventory.items()) or "empty"
-#     sections.append(f"=== INVENTORY ===\n{inv_str}")
-
-#     techs = get_technologies_researched(client)
-#     sections.append(f"=== RESEARCHED TECHNOLOGIES ===\n{techs}")
-
-#     # skills
-#     skill_names = get_skill_names(skills_dir)
-#     sections.append(f"=== AVAILABLE SKILLS ({len(skill_names)}) ===\n" + "\n".join(f"- {s}" for s in skill_names))
-
-#     return "\n\n".join(sections)
-
-
-
-# def get_planner_context(client: factorio_rcon.RCONClient, 
-#                           production_tracker: ProductionTracker,
-#                           skills_dir: Path, 
-#                           current_task: str = "") -> str:
-
-#     entities: list[dict] = get_entity_status(client)
-#     production_tracker.update(entities)
-#     throughput: dict[str, float] = production_tracker.get_throughput()
-#     inventory: dict[str, int] = get_player_inventory(client)
-#     techs: str = get_technologies_researched(client)
-
-#     planner_context: str = build_planner_context(current_task, entities, throughput, inventory, techs)
-
-#     return planner_context
-
-# def get_planner_context(
-#     client: factorio_rcon.RCONClient,
-#     production_tracker: ProductionTracker,
-#     skills_dir: Path,
-#     current_task: str = "",
-#     current_requirement: str = "",
-# ) -> str:
-
-#     entities: list[dict] = get_entity_status(client)
-#     production_tracker.update(entities)
-#     throughput: dict[str, float] = production_tracker.get_throughput()
-#     inventory: dict[str, int] = get_player_inventory(client)
-#     techs: list[str] = get_technologies_researched(client)
-
-#     return build_semantic_world_model(
-#         raw_entities=entities,
-#         throughput=throughput,
-#         inventory=inventory,
-#         technologies=techs,
-#         goal=current_task,
-#         current_requirement=current_requirement,
-#     )
-
-
 def get_planner_context(
     client: factorio_rcon.RCONClient,
     production_tracker: ProductionTracker,
-    skills_dir: Path,
     current_task: str = "",
     current_requirement: str = "",
 ) -> str:
@@ -192,11 +111,11 @@ if __name__ == "__main__":
     # factorio_client = get_factorio_client()
     # production_tracker = ProductionTracker()
 
-    # # # first observation
-    # # obs = build_observation(client=factorio_client, result=None, skills_dir=cfg.SKILLS_DIR, 
-    # #                         production_tracker=production_tracker, current_task="task example...")
-    # # # print("=== FIRST OBSERVATION ===")
-    # # print(obs)
+    # # first observation
+    obs = build_observation(client=factorio_client, result=None, skills_dir=cfg.SKILLS_DIR, 
+                            production_tracker=production_tracker, current_task="task example...")
+    # print("=== FIRST OBSERVATION ===")
+    print(obs)
 
     # # time.sleep(5)  # wait for furnace to produce something
 
@@ -208,12 +127,12 @@ if __name__ == "__main__":
 
     # context_planner = get_planner_context(factorio_client, production_tracker, cfg.SKILLS_DIR, current_task="task example...")
     # print(context_planner)
-    from agent.planner import choose_next_action, EpisodicMemory
-    from agent.observability.build_observation import get_planner_context
-    from metrics.production_tracker import ProductionTracker
+    # from agent.planner import choose_next_action, EpisodicMemory
+    # from agent.observability.build_observation import get_planner_context
+    # from metrics.production_tracker import ProductionTracker
 
-    client = get_factorio_client()
-    tracker = ProductionTracker()
-    world = get_planner_context(client, tracker, cfg.SKILLS_DIR, 
-                                current_task="Build fully automated iron plate production.")
-    print(world)
+    # client = get_factorio_client()
+    # tracker = ProductionTracker()
+    # world = get_planner_context(client, tracker, cfg.SKILLS_DIR, 
+    #                             current_task="Build fully automated iron plate production.")
+    # print(world)
